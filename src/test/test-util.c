@@ -5,9 +5,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "def.h"
 #include "fileio.h"
 #include "fs-util.h"
+#include "limits-util.h"
+#include "memory-util.h"
 #include "missing_syscall.h"
 #include "parse-util.h"
 #include "process-util.h"
@@ -213,6 +214,30 @@ static void test_protect_errno(void) {
         assert_se(errno == 12);
 }
 
+static void test_unprotect_errno_inner_function(void) {
+        PROTECT_ERRNO;
+
+        errno = 2222;
+}
+
+static void test_unprotect_errno(void) {
+        log_info("/* %s */", __func__);
+
+        errno = 4711;
+
+        PROTECT_ERRNO;
+
+        errno = 815;
+
+        UNPROTECT_ERRNO;
+
+        assert_se(errno == 4711);
+
+        test_unprotect_errno_inner_function();
+
+        assert_se(errno == 4711);
+}
+
 static void test_in_set(void) {
         log_info("/* %s */", __func__);
 
@@ -383,6 +408,7 @@ int main(int argc, char *argv[]) {
         test_div_round_up();
         test_u64log2();
         test_protect_errno();
+        test_unprotect_errno();
         test_in_set();
         test_log2i();
         test_eqzero();

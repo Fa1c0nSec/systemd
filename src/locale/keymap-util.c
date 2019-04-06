@@ -3,20 +3,23 @@
 #include <errno.h>
 #include <stdio_ext.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "bus-util.h"
-#include "def.h"
-#include "env-file.h"
 #include "env-file-label.h"
+#include "env-file.h"
 #include "env-util.h"
 #include "fd-util.h"
 #include "fileio-label.h"
 #include "fileio.h"
+#include "kbd-util.h"
 #include "keymap-util.h"
 #include "locale-util.h"
 #include "macro.h"
 #include "mkdir.h"
+#include "nulstr-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "tmpfile-util.h"
@@ -419,8 +422,7 @@ int x11_write_data(Context *c) {
                 return 0;
         }
 
-        mkdir_p_label("/etc/X11/xorg.conf.d", 0755);
-
+        (void) mkdir_p_label("/etc/X11/xorg.conf.d", 0755);
         r = fopen_temporary("/etc/X11/xorg.conf.d/00-keyboard.conf", &f, &temp_path);
         if (r < 0)
                 return r;

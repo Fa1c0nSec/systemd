@@ -18,8 +18,10 @@
 #include "alloc-util.h"
 #include "bus-common-errors.h"
 #include "bus-error.h"
+#include "bus-unit-procs.h"
 #include "bus-unit-util.h"
 #include "bus-util.h"
+#include "bus-wait-for-jobs.h"
 #include "cgroup-show.h"
 #include "cgroup-util.h"
 #include "copy.h"
@@ -35,6 +37,7 @@
 #include "macro.h"
 #include "main-func.h"
 #include "mkdir.h"
+#include "nulstr-util.h"
 #include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -44,13 +47,13 @@
 #include "rlimit-util.h"
 #include "sigbus.h"
 #include "signal-util.h"
+#include "sort-util.h"
 #include "spawn-polkit-agent.h"
 #include "stdio-util.h"
 #include "string-table.h"
 #include "strv.h"
 #include "terminal-util.h"
 #include "unit-name.h"
-#include "util.h"
 #include "verbs.h"
 #include "web-util.h"
 
@@ -2666,10 +2669,15 @@ static int clean_images(int argc, char *argv[], void *userdata) {
                 return bus_log_parse_error(r);
 
         while ((r = sd_bus_message_read(reply, "(st)", &name, &usage)) > 0) {
-                log_info("Removed image '%s'. Freed exclusive disk space: %s",
-                         name, format_bytes(fb, sizeof(fb), usage));
-
-                total += usage;
+                if (usage == UINT64_MAX) {
+                        log_info("Removed image '%s'", name);
+                        total = UINT64_MAX;
+                } else {
+                        log_info("Removed image '%s'. Freed exclusive disk space: %s",
+                                 name, format_bytes(fb, sizeof(fb), usage));
+                        if (total != UINT64_MAX)
+                                total += usage;
+                }
                 c++;
         }
 
@@ -2677,8 +2685,11 @@ static int clean_images(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return bus_log_parse_error(r);
 
-        log_info("Removed %u images in total. Total freed exclusive disk space %s.",
-                 c, format_bytes(fb, sizeof(fb), total));
+        if (total == UINT64_MAX)
+                log_info("Removed %u images in total.", c);
+        else
+                log_info("Removed %u images in total. Total freed exclusive disk space: %s.",
+                         c, format_bytes(fb, sizeof(fb), total));
 
         return 0;
 }

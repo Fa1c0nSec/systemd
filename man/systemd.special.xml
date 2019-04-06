@@ -1,10 +1,7 @@
 <?xml version='1.0'?> <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
--->
+<!-- SPDX-License-Identifier: LGPL-2.1+ -->
 
 <refentry id="systemd.special">
 
@@ -83,6 +80,7 @@
     <filename>time-sync.target</filename>,
     <filename>timers.target</filename>,
     <filename>umount.target</filename>,
+    <filename>usb-gadget.target</filename>,
     <!-- slices --><filename>-.slice</filename>,
     <filename>system.slice</filename>,
     <filename>user.slice</filename>,
@@ -799,6 +797,16 @@
             dynamically when audio hardware is found.</para>
           </listitem>
         </varlistentry>
+        <varlistentry>
+          <term><filename>usb-gadget.target</filename></term>
+          <listitem>
+            <para>This target is started automatically as soon as a
+            USB Device Controller becomes available at boot.</para>
+
+            <para>This may be used to pull in usb gadget
+            dynamically when UDC hardware is found.</para>
+          </listitem>
+        </varlistentry>
       </variablelist>
     </refsect2>
 
@@ -1014,10 +1022,23 @@
       <title>Special User Units</title>
 
       <para>When systemd runs as a user instance, the following special
-      units are available, which have similar definitions as their
+      units are available:</para>
+
+      <variablelist>
+        <varlistentry>
+          <term><filename>default.target</filename></term>
+          <listitem>
+            <para>This is the main target of the user session, started by default. Various services that
+            compose the normal user session should be pulled into this target. In this regard,
+            <filename>default.target</filename> is similar to <filename>multi-user.target</filename> in the
+            system instance, but it is a real unit, not an alias.</para>
+          </listitem>
+        </varlistentry>
+      </variablelist>
+
+      <para>In addition, the following units are available which have definitions similar to their
       system counterparts:
       <filename>exit.target</filename>,
-      <filename>default.target</filename>,
       <filename>shutdown.target</filename>,
       <filename>sockets.target</filename>,
       <filename>timers.target</filename>,
