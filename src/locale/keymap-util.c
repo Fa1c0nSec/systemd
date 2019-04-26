@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <errno.h>
-#include <stdio_ext.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -30,10 +29,6 @@ static bool startswith_comma(const char *s, const char *prefix) {
                 return false;
 
         return IN_SET(*s, ',', '\0');
-}
-
-static const char* strnulldash(const char *s) {
-        return isempty(s) || streq(s, "-") ? NULL : s;
 }
 
 static const char* systemd_kbd_model_map(void) {
@@ -427,7 +422,6 @@ int x11_write_data(Context *c) {
         if (r < 0)
                 return r;
 
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
         (void) fchmod(fileno(f), 0644);
 
         fputs("# Written by systemd-localed(8), read by systemd-localed and Xorg. It's\n"
@@ -551,15 +545,15 @@ int vconsole_convert_to_x11(Context *c) {
                         if (!streq(c->vc_keymap, a[0]))
                                 continue;
 
-                        if (!streq_ptr(c->x11_layout, strnulldash(a[1])) ||
-                            !streq_ptr(c->x11_model, strnulldash(a[2])) ||
-                            !streq_ptr(c->x11_variant, strnulldash(a[3])) ||
-                            !streq_ptr(c->x11_options, strnulldash(a[4]))) {
+                        if (!streq_ptr(c->x11_layout, empty_or_dash_to_null(a[1])) ||
+                            !streq_ptr(c->x11_model, empty_or_dash_to_null(a[2])) ||
+                            !streq_ptr(c->x11_variant, empty_or_dash_to_null(a[3])) ||
+                            !streq_ptr(c->x11_options, empty_or_dash_to_null(a[4]))) {
 
-                                if (free_and_strdup(&c->x11_layout, strnulldash(a[1])) < 0 ||
-                                    free_and_strdup(&c->x11_model, strnulldash(a[2])) < 0 ||
-                                    free_and_strdup(&c->x11_variant, strnulldash(a[3])) < 0 ||
-                                    free_and_strdup(&c->x11_options, strnulldash(a[4])) < 0)
+                                if (free_and_strdup(&c->x11_layout, empty_or_dash_to_null(a[1])) < 0 ||
+                                    free_and_strdup(&c->x11_model, empty_or_dash_to_null(a[2])) < 0 ||
+                                    free_and_strdup(&c->x11_variant, empty_or_dash_to_null(a[3])) < 0 ||
+                                    free_and_strdup(&c->x11_options, empty_or_dash_to_null(a[4])) < 0)
                                         return -ENOMEM;
 
                                 modified = true;

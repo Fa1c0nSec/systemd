@@ -108,10 +108,12 @@ static int unhex_next(const char **p, size_t *l) {
         return r;
 }
 
-int unhexmem(const char *p, size_t l, void **ret, size_t *ret_len) {
+int unhexmem_full(const char *p, size_t l, bool secure, void **ret, size_t *ret_len) {
         _cleanup_free_ uint8_t *buf = NULL;
+        size_t buf_size;
         const char *x;
         uint8_t *z;
+        int r;
 
         assert(ret);
         assert(ret_len);
@@ -121,7 +123,8 @@ int unhexmem(const char *p, size_t l, void **ret, size_t *ret_len) {
                 l = strlen(p);
 
         /* Note that the calculation of memory size is an upper boundary, as we ignore whitespace while decoding */
-        buf = malloc((l + 1) / 2 + 1);
+        buf_size = (l + 1) / 2 + 1;
+        buf = malloc(buf_size);
         if (!buf)
                 return -ENOMEM;
 
@@ -131,12 +134,16 @@ int unhexmem(const char *p, size_t l, void **ret, size_t *ret_len) {
                 a = unhex_next(&x, &l);
                 if (a == -EPIPE) /* End of string */
                         break;
-                if (a < 0)
-                        return a;
+                if (a < 0) {
+                        r = a;
+                        goto on_failure;
+                }
 
                 b = unhex_next(&x, &l);
-                if (b < 0)
-                        return b;
+                if (b < 0) {
+                        r = b;
+                        goto on_failure;
+                }
 
                 *(z++) = (uint8_t) a << 4 | (uint8_t) b;
         }
@@ -147,6 +154,12 @@ int unhexmem(const char *p, size_t l, void **ret, size_t *ret_len) {
         *ret = TAKE_PTR(buf);
 
         return 0;
+
+on_failure:
+        if (secure)
+                explicit_bzero_safe(buf, buf_size);
+
+        return r;
 }
 
 /* https://tools.ietf.org/html/rfc4648#section-6
@@ -685,11 +698,12 @@ static int unbase64_next(const char **p, size_t *l) {
         return ret;
 }
 
-int unbase64mem(const char *p, size_t l, void **ret, size_t *ret_size) {
+int unbase64mem_full(const char *p, size_t l, bool secure, void **ret, size_t *ret_size) {
         _cleanup_free_ uint8_t *buf = NULL;
         const char *x;
         uint8_t *z;
         size_t len;
+        int r;
 
         assert(p || l == 0);
         assert(ret);
@@ -712,36 +726,54 @@ int unbase64mem(const char *p, size_t l, void **ret, size_t *ret_size) {
                 a = unbase64_next(&x, &l);
                 if (a == -EPIPE) /* End of string */
                         break;
-                if (a < 0)
-                        return a;
-                if (a == INT_MAX) /* Padding is not allowed at the beginning of a 4ch block */
-                        return -EINVAL;
+                if (a < 0) {
+                        r = a;
+                        goto on_failure;
+                }
+                if (a == INT_MAX) { /* Padding is not allowed at the beginning of a 4ch block */
+                        r = -EINVAL;
+                        goto on_failure;
+                }
 
                 b = unbase64_next(&x, &l);
-                if (b < 0)
-                        return b;
-                if (b == INT_MAX) /* Padding is not allowed at the second character of a 4ch block either */
-                        return -EINVAL;
+                if (b < 0) {
+                        r = b;
+                        goto on_failure;
+                }
+                if (b == INT_MAX) { /* Padding is not allowed at the second character of a 4ch block either */
+                        r = -EINVAL;
+                        goto on_failure;
+                }
 
                 c = unbase64_next(&x, &l);
-                if (c < 0)
-                        return c;
+                if (c < 0) {
+                        r = c;
+                        goto on_failure;
+                }
 
                 d = unbase64_next(&x, &l);
-                if (d < 0)
-                        return d;
+                if (d < 0) {
+                        r = d;
+                        goto on_failure;
+                }
 
                 if (c == INT_MAX) { /* Padding at the third character */
 
-                        if (d != INT_MAX) /* If the third character is padding, the fourth must be too */
-                                return -EINVAL;
+                        if (d != INT_MAX) { /* If the third character is padding, the fourth must be too */
+                                r = -EINVAL;
+                                goto on_failure;
+                        }
 
                         /* b == 00YY0000 */
-                        if (b & 15)
-                                return -EINVAL;
+                        if (b & 15) {
+                                r = -EINVAL;
+                                goto on_failure;
+                        }
 
-                        if (l > 0) /* Trailing rubbish? */
-                                return -ENAMETOOLONG;
+                        if (l > 0) { /* Trailing rubbish? */
+                                r = -ENAMETOOLONG;
+                                goto on_failure;
+                        }
 
                         *(z++) = (uint8_t) a << 2 | (uint8_t) (b >> 4); /* XXXXXXYY */
                         break;
@@ -749,11 +781,15 @@ int unbase64mem(const char *p, size_t l, void **ret, size_t *ret_size) {
 
                 if (d == INT_MAX) {
                         /* c == 00ZZZZ00 */
-                        if (c & 3)
-                                return -EINVAL;
+                        if (c & 3) {
+                                r = -EINVAL;
+                                goto on_failure;
+                        }
 
-                        if (l > 0) /* Trailing rubbish? */
-                                return -ENAMETOOLONG;
+                        if (l > 0) { /* Trailing rubbish? */
+                                r = -ENAMETOOLONG;
+                                goto on_failure;
+                        }
 
                         *(z++) = (uint8_t) a << 2 | (uint8_t) b >> 4; /* XXXXXXYY */
                         *(z++) = (uint8_t) b << 4 | (uint8_t) c >> 2; /* YYYYZZZZ */
@@ -771,6 +807,12 @@ int unbase64mem(const char *p, size_t l, void **ret, size_t *ret_size) {
         *ret = TAKE_PTR(buf);
 
         return 0;
+
+on_failure:
+        if (secure)
+                explicit_bzero_safe(buf, len);
+
+        return r;
 }
 
 void hexdump(FILE *f, const void *p, size_t s) {

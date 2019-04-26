@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <ctype.h>
-#include <net/if.h>
+#include <linux/netdevice.h>
 
 #include "alloc-util.h"
 #include "conf-files.h"
@@ -10,7 +9,6 @@
 #include "fd-util.h"
 #include "hostname-util.h"
 #include "in-addr-util.h"
-#include "missing_network.h"
 #include "network-internal.h"
 #include "networkd-manager.h"
 #include "networkd-network.h"
@@ -173,6 +171,14 @@ int network_verify(Network *network) {
 
         assert(network);
         assert(network->filename);
+
+        if (set_isempty(network->match_mac) && strv_isempty(network->match_path) &&
+            strv_isempty(network->match_driver) && strv_isempty(network->match_type) &&
+            strv_isempty(network->match_name) && !network->conditions)
+                log_warning("%s: No valid settings found in the [Match] section. "
+                            "The file will match all interfaces. "
+                            "If that is intended, please add Name=* in the [Match] section.",
+                            network->filename);
 
         /* skip out early if configuration does not match the environment */
         if (!condition_test_list(network->conditions, NULL, NULL, NULL))
@@ -689,7 +695,7 @@ int config_parse_stacked_netdev(const char *unit,
         assert(IN_SET(kind,
                       NETDEV_KIND_VLAN, NETDEV_KIND_MACVLAN, NETDEV_KIND_MACVTAP,
                       NETDEV_KIND_IPVLAN, NETDEV_KIND_VXLAN, NETDEV_KIND_L2TP,
-                      _NETDEV_KIND_TUNNEL));
+                      NETDEV_KIND_MACSEC, _NETDEV_KIND_TUNNEL));
 
         if (!ifname_valid(rvalue)) {
                 log_syntax(unit, LOG_ERR, filename, line, 0,

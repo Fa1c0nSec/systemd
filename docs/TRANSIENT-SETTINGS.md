@@ -228,6 +228,7 @@ All cgroup/resource control settings are available for transient units
 ✓ CPUQuotaPeriodSec=
 ✓ MemoryAccounting=
 ✓ MemoryMin=
+✓ DefaultMemoryLow=
 ✓ MemoryLow=
 ✓ MemoryHigh=
 ✓ MemoryMax=
@@ -252,6 +253,7 @@ All cgroup/resource control settings are available for transient units
 ✓ TasksAccounting=
 ✓ TasksMax=
 ✓ Delegate=
+✓ DisableControllers=
 ✓ IPAccounting=
 ✓ IPAddressAllow=
 ✓ IPAddressDeny=
@@ -285,6 +287,7 @@ Most service unit settings are available for transient units.
 ✓ RestartSec=
 ✓ TimeoutStartSec=
 ✓ TimeoutStopSec=
+✓ TimeoutAbortSec=
 ✓ TimeoutSec=
 ✓ RuntimeMaxSec=
 ✓ WatchdogSec=

@@ -1,6 +1,4 @@
 #!/bin/bash
-# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
-# ex: ts=8 sw=4 sts=4 et filetype=sh
 set -e
 TEST_DESCRIPTION="test OnClockChange= + OnTimezoneChange="
 TEST_NO_NSPAWN=1
@@ -28,6 +26,13 @@ test_setup() {
         ln -fs /dev/null $initdir/etc/systemd/system/systemd-networkd.socket
         ln -fs /dev/null $initdir/etc/systemd/system/systemd-resolved.service
         ln -fs /dev/null $initdir/etc/systemd/system/systemd-machined.service
+
+        # extend the watchdog
+        mkdir -p $initdir/etc/systemd/system/systemd-timedated.service.d
+        cat >$initdir/etc/systemd/system/systemd-timedated.service.d/watchdog.conf <<EOF
+[Service]
+WatchdogSec=10min
+EOF
 
         # setup the testsuite service
         cat >$initdir/etc/systemd/system/testsuite.service <<EOF

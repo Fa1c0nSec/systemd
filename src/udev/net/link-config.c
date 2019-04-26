@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
+#include <linux/netdevice.h>
 #include <netinet/ether.h>
 
 #include "sd-device.h"
@@ -15,7 +16,6 @@
 #include "link-config.h"
 #include "log.h"
 #include "memory-util.h"
-#include "missing_network.h"
 #include "naming-scheme.h"
 #include "netlink-util.h"
 #include "network-internal.h"
@@ -158,6 +158,14 @@ int link_load_one(link_config_ctx *ctx, const char *filename) {
 
         if (link->speed > UINT_MAX)
                 return -ERANGE;
+
+        if (set_isempty(link->match_mac) && strv_isempty(link->match_path) &&
+            strv_isempty(link->match_driver) && strv_isempty(link->match_type) &&
+            strv_isempty(link->match_name) && !link->conditions)
+                log_warning("%s: No valid settings found in the [Match] section. "
+                            "The file will match all interfaces. "
+                            "If that is intended, please add OriginalName=* in the [Match] section.",
+                            filename);
 
         if (!condition_test_list(link->conditions, NULL, NULL, NULL)) {
                 log_debug("%s: Conditions do not match the system environment, skipping.", filename);

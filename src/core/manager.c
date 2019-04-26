@@ -4,7 +4,6 @@
 #include <fcntl.h>
 #include <linux/kd.h>
 #include <signal.h>
-#include <stdio_ext.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/inotify.h>
@@ -288,7 +287,7 @@ static int manager_check_ask_password(Manager *m) {
         if (!m->ask_password_event_source) {
                 assert(m->ask_password_inotify_fd < 0);
 
-                mkdir_p_label("/run/systemd/ask-password", 0755);
+                (void) mkdir_p_label("/run/systemd/ask-password", 0755);
 
                 m->ask_password_inotify_fd = inotify_init1(IN_NONBLOCK|IN_CLOEXEC);
                 if (m->ask_password_inotify_fd < 0)
@@ -764,6 +763,8 @@ int manager_new(UnitFileScope scope, ManagerTestRunFlags test_run_flags, Manager
                 .have_ask_password = -EINVAL, /* we don't know */
                 .first_boot = -1,
                 .test_run_flags = test_run_flags,
+
+                .default_oom_policy = OOM_STOP,
         };
 
 #if ENABLE_EFI
@@ -992,11 +993,10 @@ static int manager_setup_cgroups_agent(Manager *m) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to allocate cgroups agent event source: %m");
 
-                /* Process cgroups notifications early, but after having processed service notification messages or
-                 * SIGCHLD signals, so that a cgroup running empty is always just the last safety net of notification,
-                 * and we collected the metadata the notification and SIGCHLD stuff offers first. Also see handling of
-                 * cgroup inotify for the unified cgroup stuff. */
-                r = sd_event_source_set_priority(m->cgroups_agent_event_source, SD_EVENT_PRIORITY_NORMAL-4);
+                /* Process cgroups notifications early. Note that when the agent notification is received
+                 * we'll just enqueue the unit in the cgroup empty queue, hence pick a high priority than
+                 * that. Also see handling of cgroup inotify for the unified cgroup stuff. */
+                r = sd_event_source_set_priority(m->cgroups_agent_event_source, SD_EVENT_PRIORITY_NORMAL-9);
                 if (r < 0)
                         return log_error_errno(r, "Failed to set priority of cgroups agent event source: %m");
 
@@ -2110,11 +2110,9 @@ int manager_get_dump_string(Manager *m, char **ret) {
         assert(m);
         assert(ret);
 
-        f = open_memstream(&dump, &size);
+        f = open_memstream_unlocked(&dump, &size);
         if (!f)
                 return -errno;
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
         manager_dump(m, f, NULL);
 
@@ -4715,3 +4713,11 @@ static const char *const manager_timestamp_table[_MANAGER_TIMESTAMP_MAX] = {
 };
 
 DEFINE_STRING_TABLE_LOOKUP(manager_timestamp, ManagerTimestamp);
+
+static const char* const oom_policy_table[_OOM_POLICY_MAX] = {
+        [OOM_CONTINUE] = "continue",
+        [OOM_STOP] = "stop",
+        [OOM_KILL] = "kill",
+};
+
+DEFINE_STRING_TABLE_LOOKUP(oom_policy, OOMPolicy);

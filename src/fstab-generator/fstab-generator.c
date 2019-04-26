@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <stdio_ext.h>
 
 #include "alloc-util.h"
 #include "fd-util.h"
@@ -352,6 +351,12 @@ static int add_mount(
                 "SourcePath=%s\n"
                 "Documentation=man:fstab(5) man:systemd-fstab-generator(8)\n",
                 source);
+
+        /* All mounts under /sysroot need to happen later, at initrd-fs.target time. IOW, it's not
+         * technically part of the basic initrd filesystem itself, and so shouldn't inherit the default
+         * Before=local-fs.target dependency. */
+        if (in_initrd() && path_startswith(where, "/sysroot"))
+                fprintf(f, "DefaultDependencies=no\n");
 
         if (STRPTR_IN_SET(fstype, "nfs", "nfs4") && !(flags & AUTOMOUNT) &&
             fstab_test_yes_no_option(opts, "bg\0" "fg\0")) {

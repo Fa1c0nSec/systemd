@@ -24,6 +24,7 @@ CONFIG_PARSER_PROTOTYPE(config_parse_exec_nice);
 CONFIG_PARSER_PROTOTYPE(config_parse_exec_oom_score_adjust);
 CONFIG_PARSER_PROTOTYPE(config_parse_exec);
 CONFIG_PARSER_PROTOTYPE(config_parse_service_timeout);
+CONFIG_PARSER_PROTOTYPE(config_parse_service_timeout_abort);
 CONFIG_PARSER_PROTOTYPE(config_parse_service_type);
 CONFIG_PARSER_PROTOTYPE(config_parse_service_restart);
 CONFIG_PARSER_PROTOTYPE(config_parse_socket_bindtodevice);
@@ -106,6 +107,7 @@ CONFIG_PARSER_PROTOTYPE(config_parse_collect_mode);
 CONFIG_PARSER_PROTOTYPE(config_parse_pid_file);
 CONFIG_PARSER_PROTOTYPE(config_parse_exit_status);
 CONFIG_PARSER_PROTOTYPE(config_parse_disable_controllers);
+CONFIG_PARSER_PROTOTYPE(config_parse_oom_policy);
 
 /* gperf prototypes */
 const struct ConfigPerfItem* load_fragment_gperf_lookup(const char *key, GPERF_LEN_TYPE length);

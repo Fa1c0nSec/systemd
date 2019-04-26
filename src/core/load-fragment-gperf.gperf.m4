@@ -172,6 +172,7 @@ $1.CPUQuota,                     config_parse_cpu_quota,             0,         
 $1.CPUQuotaPeriodSec,            config_parse_sec_def_infinity,      0,                             offsetof($1, cgroup_context.cpu_quota_period_usec)
 $1.MemoryAccounting,             config_parse_bool,                  0,                             offsetof($1, cgroup_context.memory_accounting)
 $1.MemoryMin,                    config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
+$1.DefaultMemoryLow,             config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
 $1.MemoryLow,                    config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
 $1.MemoryHigh,                   config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
 $1.MemoryMax,                    config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
@@ -307,6 +308,7 @@ Service.RestartSec,              config_parse_sec,                   0,         
 Service.TimeoutSec,              config_parse_service_timeout,       0,                             0
 Service.TimeoutStartSec,         config_parse_service_timeout,       0,                             0
 Service.TimeoutStopSec,          config_parse_sec_fix_0,             0,                             offsetof(Service, timeout_stop_usec)
+Service.TimeoutAbortSec,         config_parse_service_timeout_abort, 0,                             0
 Service.RuntimeMaxSec,           config_parse_sec,                   0,                             offsetof(Service, runtime_max_usec)
 Service.WatchdogSec,             config_parse_sec,                   0,                             offsetof(Service, watchdog_usec)
 m4_dnl The following five only exist for compatibility, they moved into Unit, see above
@@ -333,6 +335,7 @@ Service.Sockets,                 config_parse_service_sockets,       0,         
 Service.BusPolicy,               config_parse_warn_compat,           DISABLED_LEGACY,               0
 Service.USBFunctionDescriptors,  config_parse_unit_path_printf,      0,                             offsetof(Service, usb_function_descriptors)
 Service.USBFunctionStrings,      config_parse_unit_path_printf,      0,                             offsetof(Service, usb_function_strings)
+Service.OOMPolicy,               config_parse_oom_policy,            0,                             offsetof(Service, oom_policy)
 EXEC_CONTEXT_CONFIG_ITEMS(Service)m4_dnl
 CGROUP_CONTEXT_CONFIG_ITEMS(Service)m4_dnl
 KILL_CONTEXT_CONFIG_ITEMS(Service)m4_dnl

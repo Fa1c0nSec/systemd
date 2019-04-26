@@ -86,6 +86,7 @@ DEFINE_CONFIG_PARSE_ENUM(config_parse_runtime_preserve_mode, exec_preserve_mode,
 DEFINE_CONFIG_PARSE_ENUM(config_parse_service_type, service_type, ServiceType, "Failed to parse service type");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_service_restart, service_restart, ServiceRestart, "Failed to parse service restart specifier");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_socket_bind, socket_address_bind_ipv6_only_or_bool, SocketAddressBindIPv6Only, "Failed to parse bind IPv6 only value");
+DEFINE_CONFIG_PARSE_ENUM(config_parse_oom_policy, oom_policy, OOMPolicy, "Failed to parse OOM policy");
 DEFINE_CONFIG_PARSE_ENUM_WITH_DEFAULT(config_parse_ip_tos, ip_tos, int, -1, "Failed to parse IP TOS value");
 DEFINE_CONFIG_PARSE_PTR(config_parse_blockio_weight, cg_blkio_weight_parse, uint64_t, "Invalid block IO weight");
 DEFINE_CONFIG_PARSE_PTR(config_parse_cg_weight, cg_weight_parse, uint64_t, "Invalid weight");
@@ -1893,6 +1894,42 @@ int config_parse_service_timeout(
         return 0;
 }
 
+int config_parse_service_timeout_abort(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Service *s = userdata;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(s);
+
+        rvalue += strspn(rvalue, WHITESPACE);
+        if (isempty(rvalue)) {
+                s->timeout_abort_set = false;
+                return 0;
+        }
+
+        r = parse_sec(rvalue, &s->timeout_abort_usec);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse TimeoutAbortSec= setting, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        s->timeout_abort_set = true;
+        return 0;
+}
+
 int config_parse_sec_fix_0(
                 const char *unit,
                 const char *filename,
@@ -3106,11 +3143,25 @@ int config_parse_memory_limit(
                 }
         }
 
-        if (streq(lvalue, "MemoryMin"))
+        if (streq(lvalue, "DefaultMemoryLow")) {
+                c->default_memory_low_set = true;
+                if (isempty(rvalue))
+                        c->default_memory_low = CGROUP_LIMIT_MIN;
+                else
+                        c->default_memory_low = bytes;
+        } else if (streq(lvalue, "DefaultMemoryMin")) {
+                c->default_memory_min_set = true;
+                if (isempty(rvalue))
+                        c->default_memory_min = CGROUP_LIMIT_MIN;
+                else
+                        c->default_memory_min = bytes;
+        } else if (streq(lvalue, "MemoryMin")) {
                 c->memory_min = bytes;
-        else if (streq(lvalue, "MemoryLow"))
+                c->memory_min_set = true;
+        } else if (streq(lvalue, "MemoryLow")) {
                 c->memory_low = bytes;
-        else if (streq(lvalue, "MemoryHigh"))
+                c->memory_low_set = true;
+        } else if (streq(lvalue, "MemoryHigh"))
                 c->memory_high = bytes;
         else if (streq(lvalue, "MemoryMax"))
                 c->memory_max = bytes;

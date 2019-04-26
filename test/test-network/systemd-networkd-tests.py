@@ -290,6 +290,9 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         '25-ipip-tunnel.netdev',
         '25-ipvlan.netdev',
         '25-isatap-tunnel.netdev',
+        '25-macsec.key',
+        '25-macsec.netdev',
+        '25-macsec.network',
         '25-sit-tunnel-local-any.netdev',
         '25-sit-tunnel-remote-any.netdev',
         '25-sit-tunnel.netdev',
@@ -307,6 +310,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         '25-vxlan.netdev',
         '25-wireguard-23-peers.netdev',
         '25-wireguard-23-peers.network',
+        '25-wireguard-preshared-key.txt',
         '25-wireguard-private-key.txt',
         '25-wireguard.netdev',
         '25-wireguard.network',
@@ -321,6 +325,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         'ipip.network',
         'ipvlan.network',
         'isatap.network',
+        'macsec.network',
         'macvlan.network',
         'macvtap.network',
         'sit.network',
@@ -438,16 +443,16 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
 
         output = subprocess.check_output(['ip', '-d', 'link', 'show', 'test1']).rstrip().decode('utf-8')
         print(output)
-        self.assertTrue(output, ' mtu 2004 ')
+        self.assertRegex(output, ' mtu 2004 ')
 
         output = subprocess.check_output(['ip', '-d', 'link', 'show', 'vlan99']).rstrip().decode('utf-8')
         print(output)
-        self.assertTrue(output, ' mtu 2000 ')
-        self.assertTrue(output, 'REORDER_HDR')
-        self.assertTrue(output, 'LOOSE_BINDING')
-        self.assertTrue(output, 'GVRP')
-        self.assertTrue(output, 'MVRP')
-        self.assertTrue(output, ' id 99 ')
+        self.assertRegex(output, ' mtu 2000 ')
+        self.assertRegex(output, 'REORDER_HDR')
+        self.assertRegex(output, 'LOOSE_BINDING')
+        self.assertRegex(output, 'GVRP')
+        self.assertRegex(output, 'MVRP')
+        self.assertRegex(output, ' id 99 ')
 
         output = subprocess.check_output(['ip', '-4', 'address', 'show', 'dev', 'test1']).rstrip().decode('utf-8')
         print(output)
@@ -473,11 +478,11 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
 
         output = subprocess.check_output(['ip', '-d', 'link', 'show', 'test1']).rstrip().decode('utf-8')
         print(output)
-        self.assertTrue(output, ' mtu 2000 ')
+        self.assertRegex(output, ' mtu 2000 ')
 
         output = subprocess.check_output(['ip', '-d', 'link', 'show', 'macvlan99']).rstrip().decode('utf-8')
         print(output)
-        self.assertTrue(output, ' mtu 2000 ')
+        self.assertRegex(output, ' mtu 2000 ')
 
     @expectedFailureIfModuleIsNotAvailable('ipvlan')
     def test_ipvlan(self):
@@ -528,7 +533,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
     def test_wireguard(self):
         self.copy_unit_to_networkd_unit_path('25-wireguard.netdev', '25-wireguard.network',
                                              '25-wireguard-23-peers.netdev', '25-wireguard-23-peers.network',
-                                             '25-wireguard-private-key.txt')
+                                             '25-wireguard-preshared-key.txt', '25-wireguard-private-key.txt')
         self.start_networkd(0)
         self.wait_online(['wg99:carrier', 'wg98:routable'])
 
@@ -539,21 +544,24 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
             subprocess.call('wg')
 
             output = subprocess.check_output(['wg', 'show', 'wg99', 'listen-port']).rstrip().decode('utf-8')
-            self.assertTrue(output, '51820')
+            self.assertRegex(output, '51820')
             output = subprocess.check_output(['wg', 'show', 'wg99', 'fwmark']).rstrip().decode('utf-8')
-            self.assertTrue(output, '0x4d2')
+            self.assertRegex(output, '0x4d2')
             output = subprocess.check_output(['wg', 'show', 'wg99', 'allowed-ips']).rstrip().decode('utf-8')
-            self.assertTrue(output, 'RDf+LSpeEre7YEIKaxg+wbpsNV7du+ktR99uBEtIiCA=\t192.168.26.0/24 fd31:bf08:57cb::/48')
-            self.assertTrue(output, 'lsDtM3AbjxNlauRKzHEPfgS1Zp7cp/VX5Use/P4PQSc=\tfdbc:bae2:7871:e1fe:793:8636::/96 fdbc:bae2:7871:500:e1fe:793:8636:dad1/128')
+            self.assertRegex(output, 'RDf\+LSpeEre7YEIKaxg\+wbpsNV7du\+ktR99uBEtIiCA=\t192.168.26.0/24 fd31:bf08:57cb::/48')
+            self.assertRegex(output, 'lsDtM3AbjxNlauRKzHEPfgS1Zp7cp/VX5Use/P4PQSc=\tfdbc:bae2:7871:e1fe:793:8636::/96 fdbc:bae2:7871:500:e1fe:793:8636:dad1/128')
             output = subprocess.check_output(['wg', 'show', 'wg99', 'persistent-keepalive']).rstrip().decode('utf-8')
-            self.assertTrue(output, 'RDf+LSpeEre7YEIKaxg+wbpsNV7du+ktR99uBEtIiCA=\t20')
+            self.assertRegex(output, 'RDf\+LSpeEre7YEIKaxg\+wbpsNV7du\+ktR99uBEtIiCA=\t20')
             output = subprocess.check_output(['wg', 'show', 'wg99', 'endpoints']).rstrip().decode('utf-8')
-            self.assertTrue(output, 'RDf+LSpeEre7YEIKaxg+wbpsNV7du+ktR99uBEtIiCA=\t192.168.27.3:51820')
+            self.assertRegex(output, 'RDf\+LSpeEre7YEIKaxg\+wbpsNV7du\+ktR99uBEtIiCA=\t192.168.27.3:51820')
             output = subprocess.check_output(['wg', 'show', 'wg99', 'private-key']).rstrip().decode('utf-8')
-            self.assertTrue(output, 'EEGlnEPYJV//kbvvIqxKkQwOiS+UENyPncC4bF46ong=')
+            self.assertRegex(output, 'EEGlnEPYJV//kbvvIqxKkQwOiS\+UENyPncC4bF46ong=')
+            output = subprocess.check_output(['wg', 'show', 'wg99', 'preshared-keys']).rstrip().decode('utf-8')
+            self.assertRegex(output, 'RDf\+LSpeEre7YEIKaxg\+wbpsNV7du\+ktR99uBEtIiCA=	IIWIV17wutHv7t4cR6pOT91z6NSz/T8Arh0yaywhw3M=')
+            self.assertRegex(output, 'lsDtM3AbjxNlauRKzHEPfgS1Zp7cp/VX5Use/P4PQSc=	cPLOy1YUrEI0EMMIycPJmOo0aTu3RZnw8bL5meVD6m0=')
 
             output = subprocess.check_output(['wg', 'show', 'wg98', 'private-key']).rstrip().decode('utf-8')
-            self.assertTrue(output, 'CJQUtcS9emY2fLYqDlpSZiE/QJyHkPWr+WHtZLZ90FU=')
+            self.assertRegex(output, 'CJQUtcS9emY2fLYqDlpSZiE/QJyHkPWr\+WHtZLZ90FU=')
 
     def test_geneve(self):
         self.copy_unit_to_networkd_unit_path('25-geneve.netdev')
@@ -563,10 +571,10 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
 
         output = subprocess.check_output(['ip', '-d', 'link', 'show', 'geneve99']).rstrip().decode('utf-8')
         print(output)
-        self.assertTrue(output, '192.168.22.1')
-        self.assertTrue(output, '6082')
-        self.assertTrue(output, 'udpcsum')
-        self.assertTrue(output, 'udp6zerocsumrx')
+        self.assertRegex(output, '192.168.22.1')
+        self.assertRegex(output, '6082')
+        self.assertRegex(output, 'udpcsum')
+        self.assertRegex(output, 'udp6zerocsumrx')
 
     def test_ipip_tunnel(self):
         self.copy_unit_to_networkd_unit_path('12-dummy.netdev', '25-ipip-tunnel.netdev', 'ipip.network',
@@ -870,6 +878,35 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         self.assertRegex(output, 'remcsumtx')
         self.assertRegex(output, 'remcsumrx')
         self.assertRegex(output, 'gbp')
+
+    def test_macsec(self):
+        self.copy_unit_to_networkd_unit_path('25-macsec.netdev', '25-macsec.network', '25-macsec.key',
+                                             'macsec.network', '12-dummy.netdev')
+        self.start_networkd(0)
+
+        self.wait_online(['dummy98:degraded', 'macsec99:routable'])
+
+        output = subprocess.check_output(['ip', '-d', 'link', 'show', 'macsec99']).rstrip().decode('utf-8')
+        print(output)
+        self.assertRegex(output, 'macsec99@dummy98')
+        self.assertRegex(output, 'macsec sci [0-9a-f]*000b')
+        self.assertRegex(output, 'encrypt on')
+
+        output = subprocess.check_output(['ip', 'macsec', 'show', 'macsec99']).rstrip().decode('utf-8')
+        print(output)
+        self.assertRegex(output, 'encrypt on')
+        self.assertRegex(output, 'TXSC: [0-9a-f]*000b on SA 1')
+        self.assertRegex(output, '0: PN [0-9]*, state on, key 01000000000000000000000000000000')
+        self.assertRegex(output, '1: PN [0-9]*, state on, key 02030000000000000000000000000000')
+        self.assertRegex(output, 'RXSC: c619528fe6a00100, state on')
+        self.assertRegex(output, '0: PN [0-9]*, state on, key 02030405000000000000000000000000')
+        self.assertRegex(output, '1: PN [0-9]*, state on, key 02030405060000000000000000000000')
+        self.assertRegex(output, '2: PN [0-9]*, state off, key 02030405060700000000000000000000')
+        self.assertRegex(output, '3: PN [0-9]*, state off, key 02030405060708000000000000000000')
+        self.assertNotRegex(output, 'key 02030405067080900000000000000000')
+        self.assertRegex(output, 'RXSC: 8c16456c83a90002, state on')
+        self.assertRegex(output, '0: PN [0-9]*, state off, key 02030400000000000000000000000000')
+
 
 class NetworkdL2TPTests(unittest.TestCase, Utilities):
 

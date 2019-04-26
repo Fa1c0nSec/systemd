@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <arpa/inet.h>
-#include <stdio_ext.h>
 
 #include "af-list.h"
 #include "alloc-util.h"
@@ -348,6 +347,7 @@ const sd_bus_vtable bus_cgroup_vtable[] = {
         SD_BUS_PROPERTY("BlockIOReadBandwidth", "a(st)", property_get_blockio_device_bandwidths, 0, 0),
         SD_BUS_PROPERTY("BlockIOWriteBandwidth", "a(st)", property_get_blockio_device_bandwidths, 0, 0),
         SD_BUS_PROPERTY("MemoryAccounting", "b", bus_property_get_bool, offsetof(CGroupContext, memory_accounting), 0),
+        SD_BUS_PROPERTY("DefaultMemoryLow", "t", NULL, offsetof(CGroupContext, default_memory_low), 0),
         SD_BUS_PROPERTY("MemoryMin", "t", NULL, offsetof(CGroupContext, memory_min), 0),
         SD_BUS_PROPERTY("MemoryLow", "t", NULL, offsetof(CGroupContext, memory_low), 0),
         SD_BUS_PROPERTY("MemoryHigh", "t", NULL, offsetof(CGroupContext, memory_high), 0),
@@ -401,10 +401,10 @@ static int bus_cgroup_set_transient_property(
 
                 return 1;
 
-        } else if (streq(name, "DelegateControllers")) {
+        } else if (STR_IN_SET(name, "DelegateControllers", "DisableControllers")) {
                 CGroupMask mask = 0;
 
-                if (!UNIT_VTABLE(u)->can_delegate)
+                if (streq(name, "DelegateControllers") && !UNIT_VTABLE(u)->can_delegate)
                         return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Delegation not available for unit type");
 
                 r = sd_bus_message_enter_container(message, 'a', "s");
@@ -439,13 +439,25 @@ static int bus_cgroup_set_transient_property(
                         if (r < 0)
                                 return r;
 
-                        c->delegate = true;
-                        if (mask == 0)
-                                c->delegate_controllers = 0;
-                        else
-                                c->delegate_controllers |= mask;
+                        if (streq(name, "DelegateControllers")) {
 
-                        unit_write_settingf(u, flags, name, "Delegate=%s", strempty(t));
+                                c->delegate = true;
+                                if (mask == 0)
+                                        c->delegate_controllers = 0;
+                                else
+                                        c->delegate_controllers |= mask;
+
+                                unit_write_settingf(u, flags, name, "Delegate=%s", strempty(t));
+
+                        } else if (streq(name, "DisableControllers")) {
+
+                                if (mask == 0)
+                                        c->disable_controllers = 0;
+                                else
+                                        c->disable_controllers |= mask;
+
+                                unit_write_settingf(u, flags, name, "%s=%s", name, strempty(t));
+                        }
                 }
 
                 return 1;
@@ -664,6 +676,12 @@ int bus_cgroup_set_property(
         if (streq(name, "MemoryLow"))
                 return bus_cgroup_set_memory(u, name, &c->memory_low, message, flags, error);
 
+        if (streq(name, "DefaultMemoryMin"))
+                return bus_cgroup_set_memory(u, name, &c->default_memory_min, message, flags, error);
+
+        if (streq(name, "DefaultMemoryLow"))
+                return bus_cgroup_set_memory(u, name, &c->default_memory_low, message, flags, error);
+
         if (streq(name, "MemoryHigh"))
                 return bus_cgroup_set_memory(u, name, &c->memory_high, message, flags, error);
 
@@ -681,6 +699,12 @@ int bus_cgroup_set_property(
 
         if (streq(name, "MemoryLowScale"))
                 return bus_cgroup_set_memory_scale(u, name, &c->memory_low, message, flags, error);
+
+        if (streq(name, "DefaultMemoryMinScale"))
+                return bus_cgroup_set_memory_scale(u, name, &c->default_memory_min, message, flags, error);
+
+        if (streq(name, "DefaultMemoryLowScale"))
+                return bus_cgroup_set_memory_scale(u, name, &c->default_memory_low, message, flags, error);
 
         if (streq(name, "MemoryHighScale"))
                 return bus_cgroup_set_memory_scale(u, name, &c->memory_high, message, flags, error);
@@ -821,11 +845,9 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_IO);
 
-                        f = open_memstream(&buf, &size);
+                        f = open_memstream_unlocked(&buf, &size);
                         if (!f)
                                 return -ENOMEM;
-
-                        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                         fprintf(f, "%s=\n", name);
                         LIST_FOREACH(device_limits, a, c->io_device_limits)
@@ -903,11 +925,9 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_IO);
 
-                        f = open_memstream(&buf, &size);
+                        f = open_memstream_unlocked(&buf, &size);
                         if (!f)
                                 return -ENOMEM;
-
-                        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                         fputs("IODeviceWeight=\n", f);
                         LIST_FOREACH(device_weights, a, c->io_device_weights)
@@ -982,11 +1002,9 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_IO);
 
-                        f = open_memstream(&buf, &size);
+                        f = open_memstream_unlocked(&buf, &size);
                         if (!f)
                                 return -ENOMEM;
-
-                        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                         fputs("IODeviceLatencyTargetSec=\n", f);
                         LIST_FOREACH(device_latencies, a, c->io_device_latencies)
@@ -1077,11 +1095,9 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_BLKIO);
 
-                        f = open_memstream(&buf, &size);
+                        f = open_memstream_unlocked(&buf, &size);
                         if (!f)
                                 return -ENOMEM;
-
-                        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                         if (read) {
                                 fputs("BlockIOReadBandwidth=\n", f);
@@ -1167,11 +1183,9 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_BLKIO);
 
-                        f = open_memstream(&buf, &size);
+                        f = open_memstream_unlocked(&buf, &size);
                         if (!f)
                                 return -ENOMEM;
-
-                        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                         fputs("BlockIODeviceWeight=\n", f);
                         LIST_FOREACH(device_weights, a, c->blockio_device_weights)
@@ -1275,11 +1289,9 @@ int bus_cgroup_set_property(
 
                         unit_invalidate_cgroup(u, CGROUP_MASK_DEVICES);
 
-                        f = open_memstream(&buf, &size);
+                        f = open_memstream_unlocked(&buf, &size);
                         if (!f)
                                 return -ENOMEM;
-
-                        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                         fputs("DeviceAllow=\n", f);
                         LIST_FOREACH(device_allow, a, c->device_allow)
@@ -1390,11 +1402,9 @@ int bus_cgroup_set_property(
                                 *list = ip_address_access_free_all(*list);
 
                         unit_invalidate_cgroup_bpf(u);
-                        f = open_memstream(&buf, &size);
+                        f = open_memstream_unlocked(&buf, &size);
                         if (!f)
                                 return -ENOMEM;
-
-                        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                         fputs(name, f);
                         fputs("=\n", f);
@@ -1434,7 +1444,7 @@ int bus_cgroup_set_property(
                 return 1;
         }
 
-        if (u->transient && u->load_state == UNIT_STUB)
+        if (streq(name, "DisableControllers") || (u->transient && u->load_state == UNIT_STUB))
                 return bus_cgroup_set_transient_property(u, c, name, message, flags, error);
 
         return 0;

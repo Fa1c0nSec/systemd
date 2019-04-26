@@ -3,7 +3,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <stdio_ext.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -83,14 +82,14 @@ static int manager_process_link(sd_netlink *rtnl, sd_netlink_message *mm, void *
                         goto fail;
 
                 if (is_new)
-                        log_debug("Found new link %i/%s", ifindex, l->name);
+                        log_debug("Found new link %i/%s", ifindex, l->ifname);
 
                 break;
         }
 
         case RTM_DELLINK:
                 if (l) {
-                        log_debug("Removing link %i/%s", l->ifindex, l->name);
+                        log_debug("Removing link %i/%s", l->ifindex, l->ifname);
                         link_remove_user(l);
                         link_free(l);
                 }
@@ -511,11 +510,9 @@ static int manager_sigusr1(sd_event_source *s, const struct signalfd_siginfo *si
         assert(si);
         assert(m);
 
-        f = open_memstream(&buffer, &size);
+        f = open_memstream_unlocked(&buffer, &size);
         if (!f)
                 return log_oom();
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
         LIST_FOREACH(scopes, scope, m->dns_scopes)
                 dns_scope_dump(scope, f);

@@ -67,6 +67,7 @@ typedef enum ServiceResult {
         SERVICE_FAILURE_CORE_DUMP,
         SERVICE_FAILURE_WATCHDOG,
         SERVICE_FAILURE_START_LIMIT_HIT,
+        SERVICE_FAILURE_OOM_KILL,
         _SERVICE_RESULT_MAX,
         _SERVICE_RESULT_INVALID = -1
 } ServiceResult;
@@ -96,6 +97,8 @@ struct Service {
         usec_t restart_usec;
         usec_t timeout_start_usec;
         usec_t timeout_stop_usec;
+        usec_t timeout_abort_usec;
+        bool timeout_abort_set;
         usec_t runtime_max_usec;
 
         dual_timestamp watchdog_timestamp;
@@ -184,7 +187,14 @@ struct Service {
 
         unsigned n_restarts;
         bool flush_n_restarts;
+
+        OOMPolicy oom_policy;
 };
+
+static inline usec_t service_timeout_abort_usec(Service *s) {
+        assert(s);
+        return s->timeout_abort_set ? s->timeout_abort_usec : s->timeout_stop_usec;
+}
 
 extern const UnitVTable service_vtable;
 

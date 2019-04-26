@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <getopt.h>
-#include <stdio_ext.h>
 
 #include "sd-bus.h"
 
@@ -51,6 +50,7 @@ static size_t arg_snaplen = 4096;
 static bool arg_list = false;
 static bool arg_quiet = false;
 static bool arg_verbose = false;
+static bool arg_xml_interface = false;
 static bool arg_expect_reply = true;
 static bool arg_auto_start = true;
 static bool arg_allow_interactive_authorization = true;
@@ -949,6 +949,12 @@ static int introspect(int argc, char **argv, void *userdata) {
         if (r < 0)
                 return bus_log_parse_error(r);
 
+        if (arg_xml_interface) {
+                /* Just dump the received XML and finish */
+                puts(xml);
+                return 0;
+        }
+
         /* First, get list of all properties */
         r = parse_xml_introspect(argv[2], xml, &ops, members);
         if (r < 0)
@@ -997,11 +1003,9 @@ static int introspect(int argc, char **argv, void *userdata) {
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
-                        mf = open_memstream(&buf, &sz);
+                        mf = open_memstream_unlocked(&buf, &sz);
                         if (!mf)
                                 return log_oom();
-
-                        (void) __fsetlocking(mf, FSETLOCKING_BYCALLER);
 
                         r = format_cmdline(reply, mf, false);
                         if (r < 0)
@@ -2258,6 +2262,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_SIZE,
                 ARG_LIST,
                 ARG_VERBOSE,
+                ARG_XML_INTERFACE,
                 ARG_EXPECT_REPLY,
                 ARG_AUTO_START,
                 ARG_ALLOW_INTERACTIVE_AUTHORIZATION,
@@ -2287,6 +2292,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "list",                            no_argument,       NULL, ARG_LIST                            },
                 { "quiet",                           no_argument,       NULL, 'q'                                 },
                 { "verbose",                         no_argument,       NULL, ARG_VERBOSE                         },
+                { "xml-interface",                   no_argument,       NULL, ARG_XML_INTERFACE                   },
                 { "expect-reply",                    required_argument, NULL, ARG_EXPECT_REPLY                    },
                 { "auto-start",                      required_argument, NULL, ARG_AUTO_START                      },
                 { "allow-interactive-authorization", required_argument, NULL, ARG_ALLOW_INTERACTIVE_AUTHORIZATION },
@@ -2389,6 +2395,10 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_VERBOSE:
                         arg_verbose = true;
+                        break;
+
+                case ARG_XML_INTERFACE:
+                        arg_xml_interface = true;
                         break;
 
                 case ARG_EXPECT_REPLY:

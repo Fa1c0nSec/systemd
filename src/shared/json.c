@@ -4,7 +4,6 @@
 #include <locale.h>
 #include <math.h>
 #include <stdarg.h>
-#include <stdio_ext.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -380,9 +379,13 @@ int json_variant_new_stringn(JsonVariant **ret, const char *s, size_t n) {
 
         assert_return(ret, -EINVAL);
         if (!s) {
-                assert_return(n == 0, -EINVAL);
+                assert_return(IN_SET(n, 0, (size_t) -1), -EINVAL);
                 return json_variant_new_null(ret);
         }
+        if (n == (size_t) -1) /* determine length automatically */
+                n = strlen(s);
+        else if (memchr(s, 0, n)) /* don't allow embedded NUL, as we can't express that in JSON */
+                return -EINVAL;
         if (n == 0) {
                 *ret = JSON_VARIANT_MAGIC_EMPTY_STRING;
                 return 0;
@@ -586,7 +589,7 @@ int json_variant_new_array_strv(JsonVariant **ret, char **l) {
                 if (k > INLINE_STRING_MAX) {
                         /* If string is too long, store it as reference. */
 
-                        r = json_variant_new_stringn(&w->reference, l[v->n_elements], k);
+                        r = json_variant_new_string(&w->reference, l[v->n_elements]);
                         if (r < 0)
                                 return r;
 
@@ -1558,11 +1561,9 @@ int json_variant_format(JsonVariant *v, JsonFormatFlags flags, char **ret) {
         {
                 _cleanup_fclose_ FILE *f = NULL;
 
-                f = open_memstream(&s, &sz);
+                f = open_memstream_unlocked(&s, &sz);
                 if (!f)
                         return -ENOMEM;
-
-                (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                 json_variant_dump(v, flags, f, NULL);
 
@@ -3424,7 +3425,7 @@ int json_dispatch_strv(const char *name, JsonVariant *variant, JsonDispatchFlags
 
                 r = strv_extend(&l, json_variant_string(e));
                 if (r < 0)
-                        return json_log(variant, flags, r, "Failed to append array element: %m");
+                        return json_log(e, flags, r, "Failed to append array element: %m");
         }
 
         strv_free_and_replace(*s, l);

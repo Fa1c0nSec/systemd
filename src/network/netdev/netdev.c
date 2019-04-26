@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <net/if.h>
+#include <netinet/in.h>
 
 #include "alloc-util.h"
 #include "conf-files.h"
@@ -14,6 +15,7 @@
 #include "netdev/geneve.h"
 #include "netdev/ipvlan.h"
 #include "netdev/l2tp-tunnel.h"
+#include "netdev/macsec.h"
 #include "netdev/macvlan.h"
 #include "netdev/netdev.h"
 #include "netdev/netdevsim.h"
@@ -66,6 +68,7 @@ const NetDevVTable * const netdev_vtable[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_FOU] = &foutnl_vtable,
         [NETDEV_KIND_ERSPAN] = &erspan_vtable,
         [NETDEV_KIND_L2TP] = &l2tptnl_vtable,
+        [NETDEV_KIND_MACSEC] = &macsec_vtable,
 };
 
 static const char* const netdev_kind_table[_NETDEV_KIND_MAX] = {
@@ -98,6 +101,7 @@ static const char* const netdev_kind_table[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_FOU] = "fou",
         [NETDEV_KIND_ERSPAN] = "erspan",
         [NETDEV_KIND_L2TP] = "l2tp",
+        [NETDEV_KIND_MACSEC] = "macsec",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(netdev_kind, NetDevKind);

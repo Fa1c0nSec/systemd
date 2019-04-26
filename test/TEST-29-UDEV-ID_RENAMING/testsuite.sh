@@ -1,6 +1,4 @@
 #!/bin/bash
-# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
-# ex: ts=8 sw=4 sts=4 et filetype=sh
 set -ex
 set -o pipefail
 
@@ -18,7 +16,7 @@ SUBSYSTEM=="net", KERNEL=="lo", ENV{ID_RENAMING}="1"
 LABEL="lo_end"
 EOF
 
-udevadm control --log-priority=debug --reload
+udevadm control --log-priority=debug --reload --timeout=600
 udevadm trigger --action=add --settle /sys/devices/virtual/net/lo
 udevadm info /sys/devices/virtual/net/lo
 sleep 1
@@ -38,7 +36,7 @@ STATE=$(systemctl show --property=ActiveState --value sys-devices-virtual-net-lo
 [[ $STATE == "active" ]] || exit 1
 
 rm -f /run/udev/rules.d/50-testsuite.rules
-udevadm control --reload
+udevadm control --reload --timeout=600
 
 echo OK > /testok
 

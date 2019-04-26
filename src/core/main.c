@@ -112,6 +112,8 @@ static ExecOutput arg_default_std_error = EXEC_OUTPUT_INHERIT;
 static usec_t arg_default_restart_usec = DEFAULT_RESTART_USEC;
 static usec_t arg_default_timeout_start_usec = DEFAULT_TIMEOUT_USEC;
 static usec_t arg_default_timeout_stop_usec = DEFAULT_TIMEOUT_USEC;
+static usec_t arg_default_timeout_abort_usec = DEFAULT_TIMEOUT_USEC;
+static bool arg_default_timeout_abort_set = false;
 static usec_t arg_default_start_limit_interval = DEFAULT_START_LIMIT_INTERVAL;
 static unsigned arg_default_start_limit_burst = DEFAULT_START_LIMIT_BURST;
 static usec_t arg_runtime_watchdog = 0;
@@ -135,6 +137,7 @@ static bool arg_default_tasks_accounting = true;
 static uint64_t arg_default_tasks_max = UINT64_MAX;
 static sd_id128_t arg_machine_id = {};
 static EmergencyAction arg_cad_burst_action = EMERGENCY_ACTION_REBOOT_FORCE;
+static OOMPolicy arg_default_oom_policy = OOM_STOP;
 
 _noreturn_ static void freeze_or_exit_or_reboot(void) {
 
@@ -667,6 +670,40 @@ static int config_parse_crash_chvt(
         return 0;
 }
 
+static int config_parse_timeout_abort(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        rvalue += strspn(rvalue, WHITESPACE);
+        if (isempty(rvalue)) {
+                arg_default_timeout_abort_set = false;
+                return 0;
+        }
+
+        r = parse_sec(rvalue, &arg_default_timeout_abort_usec);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse DefaultTimeoutAbortSec= setting, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        arg_default_timeout_abort_set = true;
+        return 0;
+}
+
 static int parse_config_file(void) {
 
         const ConfigTableItem items[] = {
@@ -696,6 +733,7 @@ static int parse_config_file(void) {
                 { "Manager", "DefaultStandardError",      config_parse_output_restricted,0, &arg_default_std_error                 },
                 { "Manager", "DefaultTimeoutStartSec",    config_parse_sec,              0, &arg_default_timeout_start_usec        },
                 { "Manager", "DefaultTimeoutStopSec",     config_parse_sec,              0, &arg_default_timeout_stop_usec         },
+                { "Manager", "DefaultTimeoutAbortSec",    config_parse_timeout_abort,    0, NULL                                   },
                 { "Manager", "DefaultRestartSec",         config_parse_sec,              0, &arg_default_restart_usec              },
                 { "Manager", "DefaultStartLimitInterval", config_parse_sec,              0, &arg_default_start_limit_interval      }, /* obsolete alias */
                 { "Manager", "DefaultStartLimitIntervalSec",config_parse_sec,            0, &arg_default_start_limit_interval      },
@@ -725,6 +763,7 @@ static int parse_config_file(void) {
                 { "Manager", "DefaultTasksAccounting",    config_parse_bool,             0, &arg_default_tasks_accounting          },
                 { "Manager", "DefaultTasksMax",           config_parse_tasks_max,        0, &arg_default_tasks_max                 },
                 { "Manager", "CtrlAltDelBurstAction",     config_parse_emergency_action, 0, &arg_cad_burst_action                  },
+                { "Manager", "DefaultOOMPolicy",          config_parse_oom_policy,       0, &arg_default_oom_policy                },
                 {}
         };
 
@@ -763,6 +802,8 @@ static void set_manager_defaults(Manager *m) {
         m->default_std_error = arg_default_std_error;
         m->default_timeout_start_usec = arg_default_timeout_start_usec;
         m->default_timeout_stop_usec = arg_default_timeout_stop_usec;
+        m->default_timeout_abort_usec = arg_default_timeout_abort_usec;
+        m->default_timeout_abort_set = arg_default_timeout_abort_set;
         m->default_restart_usec = arg_default_restart_usec;
         m->default_start_limit_interval = arg_default_start_limit_interval;
         m->default_start_limit_burst = arg_default_start_limit_burst;
@@ -780,6 +821,7 @@ static void set_manager_defaults(Manager *m) {
         m->default_memory_accounting = arg_default_memory_accounting;
         m->default_tasks_accounting = arg_default_tasks_accounting;
         m->default_tasks_max = arg_default_tasks_max;
+        m->default_oom_policy = arg_default_oom_policy;
 
         (void) manager_set_default_rlimits(m, arg_default_rlimit);
 

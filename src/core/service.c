@@ -99,6 +99,8 @@ static void service_init(Unit *u) {
 
         s->timeout_start_usec = u->manager->default_timeout_start_usec;
         s->timeout_stop_usec = u->manager->default_timeout_stop_usec;
+        s->timeout_abort_usec = u->manager->default_timeout_abort_usec;
+        s->timeout_abort_set = u->manager->default_timeout_abort_set;
         s->restart_usec = u->manager->default_restart_usec;
         s->runtime_max_usec = USEC_INFINITY;
         s->type = _SERVICE_TYPE_INVALID;
@@ -112,6 +114,8 @@ static void service_init(Unit *u) {
                 EXEC_KEYRING_PRIVATE : EXEC_KEYRING_INHERIT;
 
         s->watchdog_original_usec = USEC_INFINITY;
+
+        s->oom_policy = _OOM_POLICY_INVALID;
 }
 
 static void service_unwatch_control_pid(Service *s) {
@@ -731,6 +735,15 @@ static int service_add_extras(Service *s) {
             (s->type == SERVICE_NOTIFY || s->watchdog_usec > 0 || s->n_fd_store_max > 0))
                 s->notify_access = NOTIFY_MAIN;
 
+        /* If no OOM policy was explicitly set, then default to the configure default OOM policy. Except when
+         * delegation is on, in that case it we assume the payload knows better what to do and can process
+         * things in a more focussed way. */
+        if (s->oom_policy < 0)
+                s->oom_policy = s->cgroup_context.delegate ? OOM_CONTINUE : UNIT(s)->manager->default_oom_policy;
+
+        /* Let the kernel do the killing if that's requested. */
+        s->cgroup_context.memory_oom_group = s->oom_policy == OOM_KILL;
+
         r = service_add_default_dependencies(s);
         if (r < 0)
                 return r;
@@ -778,7 +791,7 @@ static int service_load(Unit *u) {
 
 static void service_dump(Unit *u, FILE *f, const char *prefix) {
         char buf_restart[FORMAT_TIMESPAN_MAX], buf_start[FORMAT_TIMESPAN_MAX], buf_stop[FORMAT_TIMESPAN_MAX];
-        char buf_runtime[FORMAT_TIMESPAN_MAX], buf_watchdog[FORMAT_TIMESPAN_MAX];
+        char buf_runtime[FORMAT_TIMESPAN_MAX], buf_watchdog[FORMAT_TIMESPAN_MAX], buf_abort[FORMAT_TIMESPAN_MAX];
         ServiceExecCommand c;
         Service *s = SERVICE(u);
         const char *prefix2;
@@ -799,7 +812,8 @@ static void service_dump(Unit *u, FILE *f, const char *prefix) {
                 "%sType: %s\n"
                 "%sRestart: %s\n"
                 "%sNotifyAccess: %s\n"
-                "%sNotifyState: %s\n",
+                "%sNotifyState: %s\n"
+                "%sOOMPolicy: %s\n",
                 prefix, service_state_to_string(s->state),
                 prefix, service_result_to_string(s->result),
                 prefix, service_result_to_string(s->reload_result),
@@ -810,7 +824,8 @@ static void service_dump(Unit *u, FILE *f, const char *prefix) {
                 prefix, service_type_to_string(s->type),
                 prefix, service_restart_to_string(s->restart),
                 prefix, notify_access_to_string(s->notify_access),
-                prefix, notify_state_to_string(s->notify_state));
+                prefix, notify_state_to_string(s->notify_state),
+                prefix, oom_policy_to_string(s->oom_policy));
 
         if (s->control_pid > 0)
                 fprintf(f,
@@ -846,12 +861,19 @@ static void service_dump(Unit *u, FILE *f, const char *prefix) {
         fprintf(f,
                 "%sRestartSec: %s\n"
                 "%sTimeoutStartSec: %s\n"
-                "%sTimeoutStopSec: %s\n"
-                "%sRuntimeMaxSec: %s\n"
-                "%sWatchdogSec: %s\n",
+                "%sTimeoutStopSec: %s\n",
                 prefix, format_timespan(buf_restart, sizeof(buf_restart), s->restart_usec, USEC_PER_SEC),
                 prefix, format_timespan(buf_start, sizeof(buf_start), s->timeout_start_usec, USEC_PER_SEC),
-                prefix, format_timespan(buf_stop, sizeof(buf_stop), s->timeout_stop_usec, USEC_PER_SEC),
+                prefix, format_timespan(buf_stop, sizeof(buf_stop), s->timeout_stop_usec, USEC_PER_SEC));
+
+        if (s->timeout_abort_set)
+                fprintf(f,
+                        "%sTimeoutAbortSec: %s\n",
+                        prefix, format_timespan(buf_abort, sizeof(buf_abort), s->timeout_abort_usec, USEC_PER_SEC));
+
+        fprintf(f,
+                "%sRuntimeMaxSec: %s\n"
+                "%sWatchdogSec: %s\n",
                 prefix, format_timespan(buf_runtime, sizeof(buf_runtime), s->runtime_max_usec, USEC_PER_SEC),
                 prefix, format_timespan(buf_watchdog, sizeof(buf_watchdog), s->watchdog_usec, USEC_PER_SEC));
 
@@ -1119,13 +1141,15 @@ static usec_t service_coldplug_timeout(Service *s) {
                 return usec_add(UNIT(s)->active_enter_timestamp.monotonic, s->runtime_max_usec);
 
         case SERVICE_STOP:
-        case SERVICE_STOP_WATCHDOG:
         case SERVICE_STOP_SIGTERM:
         case SERVICE_STOP_SIGKILL:
         case SERVICE_STOP_POST:
         case SERVICE_FINAL_SIGTERM:
         case SERVICE_FINAL_SIGKILL:
                 return usec_add(UNIT(s)->state_change_timestamp.monotonic, s->timeout_stop_usec);
+
+        case SERVICE_STOP_WATCHDOG:
+                return usec_add(UNIT(s)->state_change_timestamp.monotonic, service_timeout_abort_usec(s));
 
         case SERVICE_AUTO_RESTART:
                 return usec_add(UNIT(s)->inactive_enter_timestamp.monotonic, s->restart_usec);
@@ -1844,7 +1868,8 @@ static void service_enter_signal(Service *s, ServiceState state, ServiceResult f
                 goto fail;
 
         if (r > 0) {
-                r = service_arm_timer(s, usec_add(now(CLOCK_MONOTONIC), s->timeout_stop_usec));
+                r = service_arm_timer(s, usec_add(now(CLOCK_MONOTONIC),
+                                      state == SERVICE_STOP_WATCHDOG ? service_timeout_abort_usec(s) : s->timeout_stop_usec));
                 if (r < 0)
                         goto fail;
 
@@ -2415,7 +2440,7 @@ static int service_stop(Unit *u) {
 
         /* Already on it */
         if (IN_SET(s->state,
-                   SERVICE_STOP, SERVICE_STOP_WATCHDOG, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
+                   SERVICE_STOP, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
                    SERVICE_FINAL_SIGTERM, SERVICE_FINAL_SIGKILL))
                 return 0;
 
@@ -2427,7 +2452,7 @@ static int service_stop(Unit *u) {
 
         /* If there's already something running we go directly into
          * kill mode. */
-        if (IN_SET(s->state, SERVICE_START_PRE, SERVICE_START, SERVICE_START_POST, SERVICE_RELOAD)) {
+        if (IN_SET(s->state, SERVICE_START_PRE, SERVICE_START, SERVICE_START_POST, SERVICE_RELOAD, SERVICE_STOP_WATCHDOG)) {
                 service_enter_signal(s, SERVICE_STOP_SIGTERM, SERVICE_SUCCESS);
                 return 0;
         }
@@ -3148,7 +3173,7 @@ static void service_notify_cgroup_empty_event(Unit *u) {
 
         assert(u);
 
-        log_unit_debug(u, "cgroup is empty");
+        log_unit_debug(u, "Control group is empty.");
 
         switch (s->state) {
 
@@ -3204,6 +3229,57 @@ static void service_notify_cgroup_empty_event(Unit *u) {
                 if (main_pid_good(s) <= 0 && control_pid_good(s) <= 0)
                         service_enter_dead(s, SERVICE_SUCCESS, true);
 
+                break;
+
+        default:
+                ;
+        }
+}
+
+static void service_notify_cgroup_oom_event(Unit *u) {
+        Service *s = SERVICE(u);
+
+        log_unit_debug(u, "Process of control group was killed by the OOM killer.");
+
+        if (s->oom_policy == OOM_CONTINUE)
+                return;
+
+        switch (s->state) {
+
+        case SERVICE_START_PRE:
+        case SERVICE_START:
+        case SERVICE_START_POST:
+        case SERVICE_STOP:
+                if (s->oom_policy == OOM_STOP)
+                        service_enter_signal(s, SERVICE_STOP_SIGTERM, SERVICE_FAILURE_OOM_KILL);
+                else if (s->oom_policy == OOM_KILL)
+                        service_enter_signal(s, SERVICE_STOP_SIGKILL, SERVICE_FAILURE_OOM_KILL);
+
+                break;
+
+        case SERVICE_EXITED:
+        case SERVICE_RUNNING:
+                if (s->oom_policy == OOM_STOP)
+                        service_enter_stop(s, SERVICE_FAILURE_OOM_KILL);
+                else if (s->oom_policy == OOM_KILL)
+                        service_enter_signal(s, SERVICE_STOP_SIGKILL, SERVICE_FAILURE_OOM_KILL);
+
+                break;
+
+        case SERVICE_STOP_WATCHDOG:
+        case SERVICE_STOP_SIGTERM:
+                service_enter_signal(s, SERVICE_STOP_SIGKILL, SERVICE_FAILURE_OOM_KILL);
+                break;
+
+        case SERVICE_STOP_SIGKILL:
+        case SERVICE_FINAL_SIGKILL:
+                if (s->result == SERVICE_SUCCESS)
+                        s->result = SERVICE_FAILURE_OOM_KILL;
+                break;
+
+        case SERVICE_STOP_POST:
+        case SERVICE_FINAL_SIGTERM:
+                service_enter_signal(s, SERVICE_FINAL_SIGKILL, SERVICE_FAILURE_OOM_KILL);
                 break;
 
         default:
@@ -3666,6 +3742,16 @@ static bool service_notify_message_authorized(Service *s, pid_t pid, char **tags
         return true;
 }
 
+static void service_force_watchdog(Service *s) {
+        if (!UNIT(s)->manager->service_watchdogs)
+                return;
+
+        log_unit_error(UNIT(s), "Watchdog request (last status: %s)!",
+                       s->status_text ? s->status_text : "<unset>");
+
+        service_enter_signal(s, SERVICE_STOP_WATCHDOG, SERVICE_FAILURE_WATCHDOG);
+}
+
 static void service_notify_message(
                 Unit *u,
                 const struct ucred *ucred,
@@ -3812,8 +3898,15 @@ static void service_notify_message(
         }
 
         /* Interpret WATCHDOG= */
-        if (strv_find(tags, "WATCHDOG=1"))
-                service_reset_watchdog(s);
+        e = strv_find_startswith(tags, "WATCHDOG=");
+        if (e) {
+                if (streq(e, "1"))
+                        service_reset_watchdog(s);
+                else if (streq(e, "trigger"))
+                        service_force_watchdog(s);
+                else
+                        log_unit_warning(u, "Passed WATCHDOG= field is invalid, ignoring.");
+        }
 
         e = strv_find_startswith(tags, "WATCHDOG_USEC=");
         if (e) {
@@ -4116,6 +4209,7 @@ static const char* const service_result_table[_SERVICE_RESULT_MAX] = {
         [SERVICE_FAILURE_CORE_DUMP] = "core-dump",
         [SERVICE_FAILURE_WATCHDOG] = "watchdog",
         [SERVICE_FAILURE_START_LIMIT_HIT] = "start-limit-hit",
+        [SERVICE_FAILURE_OOM_KILL] = "oom-kill",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(service_result, ServiceResult);
@@ -4169,6 +4263,7 @@ const UnitVTable service_vtable = {
         .reset_failed = service_reset_failed,
 
         .notify_cgroup_empty = service_notify_cgroup_empty_event,
+        .notify_cgroup_oom = service_notify_cgroup_oom_event,
         .notify_message = service_notify_message,
 
         .main_pid = service_main_pid,

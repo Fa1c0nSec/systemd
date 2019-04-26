@@ -2,10 +2,11 @@
 
 typedef struct Wireguard Wireguard;
 
+#include <linux/wireguard.h>
+
 #include "in-addr-util.h"
 #include "netdev.h"
 #include "socket-util.h"
-#include "wireguard-netlink.h"
 
 typedef struct WireguardIPmask {
         uint16_t family;
@@ -21,6 +22,7 @@ typedef struct WireguardPeer {
 
         uint8_t public_key[WG_KEY_LEN];
         uint8_t preshared_key[WG_KEY_LEN];
+        char *preshared_key_file;
         uint32_t flags;
         uint16_t persistent_keepalive_interval;
 
@@ -63,4 +65,5 @@ CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_public_key);
 CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_private_key);
 CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_private_key_file);
 CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_preshared_key);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_preshared_key_file);
 CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_keepalive);
