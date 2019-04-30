@@ -913,7 +913,7 @@ static int route_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
         return 1;
 }
 
-static int link_request_set_routes(Link *link) {
+int link_request_set_routes(Link *link) {
         enum {
                 PHASE_NON_GATEWAY, /* First phase: Routes without a gateway */
                 PHASE_GATEWAY,     /* Second phase: Routes with a gateway */
@@ -1854,7 +1854,6 @@ static int link_acquire_ipv4_conf(Link *link) {
         int r;
 
         assert(link);
-        assert(link->network);
         assert(link->manager);
         assert(link->manager->event);
 
@@ -3365,7 +3364,7 @@ static int link_initialized_and_synced(Link *link) {
         /* We may get called either from the asynchronous netlink callback,
          * or directly for link_add() if running in a container. See link_add(). */
         if (!IN_SET(link->state, LINK_STATE_PENDING, LINK_STATE_INITIALIZED))
-                return 1;
+                return 0;
 
         log_link_debug(link, "Link state is up-to-date");
         link_set_state(link, LINK_STATE_INITIALIZED);
@@ -3383,7 +3382,7 @@ static int link_initialized_and_synced(Link *link) {
                                 &link->mac, &network);
                 if (r == -ENOENT) {
                         link_enter_unmanaged(link);
-                        return 1;
+                        return 0;
                 } else if (r == 0 && network->unmanaged) {
                         link_enter_unmanaged(link);
                         return 0;
@@ -3420,7 +3419,7 @@ static int link_initialized_and_synced(Link *link) {
         if (r < 0)
                 return r;
 
-        return 1;
+        return 0;
 }
 
 static int link_initialized_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
@@ -3843,7 +3842,7 @@ int link_update(Link *link, sd_netlink_message *m) {
         assert(m);
 
         if (link->state == LINK_STATE_LINGER) {
-                log_link_info(link, "Link readded");
+                log_link_info(link, "Link re-added");
                 link_set_state(link, LINK_STATE_CONFIGURING);
 
                 r = link_new_carrier_maps(link);

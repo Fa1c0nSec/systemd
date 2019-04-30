@@ -214,10 +214,7 @@ static int dhcp_lease_lost(Link *link) {
                                 }
                         }
                 }
-        }
 
-        r = address_new(&address);
-        if (r >= 0) {
                 r = sd_dhcp_lease_get_router(link->dhcp_lease, &router);
                 if (r > 0 && !in4_addr_is_null(&router[0])) {
                         _cleanup_(route_freep) Route *route_gw = NULL;
@@ -241,7 +238,10 @@ static int dhcp_lease_lost(Link *link) {
                                 route_remove(route, link, NULL);
                         }
                 }
+        }
 
+        r = address_new(&address);
+        if (r >= 0) {
                 r = sd_dhcp_lease_get_address(link->dhcp_lease, &addr);
                 if (r >= 0) {
                         r = sd_dhcp_lease_get_netmask(link->dhcp_lease, &netmask);
@@ -307,6 +307,9 @@ static int dhcp4_address_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *
                 manager_rtnl_process_address(rtnl, m, link->manager);
 
         link_set_dhcp_routes(link);
+
+        /* Add back static routes since kernel removes while DHCPv4 address is removed from when lease expires */
+        link_request_set_routes(link);
 
         if (link->dhcp4_messages == 0) {
                 link->dhcp4_configured = true;
@@ -471,7 +474,7 @@ static int dhcp_lease_acquired(sd_dhcp_client *client, Link *link) {
                         if (r < 0)
                                 log_link_warning_errno(link, r, "Unable to shorten overlong DHCP hostname '%s', ignoring: %m", dhcpname);
                         if (r == 1)
-                                log_link_notice(link, "Overlong DCHP hostname received, shortened from '%s' to '%s'", dhcpname, hostname);
+                                log_link_notice(link, "Overlong DHCP hostname received, shortened from '%s' to '%s'", dhcpname, hostname);
                 }
 
                 if (hostname) {
