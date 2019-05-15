@@ -139,8 +139,8 @@ class Utilities():
                 if (os.path.exists(os.path.join(network_unit_file_path, unit + '.d'))):
                     shutil.rmtree(os.path.join(network_unit_file_path, unit + '.d'))
 
-    def start_dnsmasq(self, additional_options=''):
-        dnsmasq_command = 'dnsmasq -8 /var/run/networkd-ci/test-dnsmasq-log-file --log-queries=extra --log-dhcp --pid-file=/var/run/networkd-ci/test-test-dnsmasq.pid --conf-file=/dev/null --interface=veth-peer --enable-ra --dhcp-range=2600::10,2600::20 --dhcp-range=192.168.5.10,192.168.5.200 -R --dhcp-leasefile=/var/run/networkd-ci/lease --dhcp-option=26,1492 --dhcp-option=option:router,192.168.5.1 --dhcp-option=33,192.168.5.4,192.168.5.5 --port=0 ' + additional_options
+    def start_dnsmasq(self, additional_options='', lease_time='1h'):
+        dnsmasq_command = f'dnsmasq -8 /var/run/networkd-ci/test-dnsmasq-log-file --log-queries=extra --log-dhcp --pid-file=/var/run/networkd-ci/test-test-dnsmasq.pid --conf-file=/dev/null --interface=veth-peer --enable-ra --dhcp-range=2600::10,2600::20,{lease_time} --dhcp-range=192.168.5.10,192.168.5.200,{lease_time} -R --dhcp-leasefile=/var/run/networkd-ci/lease --dhcp-option=26,1492 --dhcp-option=option:router,192.168.5.1 --dhcp-option=33,192.168.5.4,192.168.5.5 --port=0 ' + additional_options
         subprocess.check_call(dnsmasq_command, shell=True)
 
         time.sleep(10)
@@ -331,6 +331,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         'sit.network',
         'vti6.network',
         'vti.network',
+        'vxlan-test1.network',
         'vxlan.network']
 
     def setUp(self):
@@ -861,14 +862,15 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         subprocess.call(['ip', 'fou', 'del', 'port', '55556'])
 
     def test_vxlan(self):
-        self.copy_unit_to_networkd_unit_path('25-vxlan.netdev', 'vxlan.network', '11-dummy.netdev')
-        self.start_networkd()
+        self.copy_unit_to_networkd_unit_path('25-vxlan.netdev', 'vxlan.network',
+                                             '11-dummy.netdev', 'vxlan-test1.network')
+        self.start_networkd(0)
 
-        self.assertTrue(self.link_exits('vxlan99'))
+        self.wait_online(['test1:degraded', 'vxlan99:degraded'])
 
         output = subprocess.check_output(['ip', '-d', 'link', 'show', 'vxlan99']).rstrip().decode('utf-8')
         print(output)
-        self.assertRegex(output, "999")
+        self.assertRegex(output, '999')
         self.assertRegex(output, '5555')
         self.assertRegex(output, 'l2miss')
         self.assertRegex(output, 'l3miss')
@@ -878,6 +880,12 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         self.assertRegex(output, 'remcsumtx')
         self.assertRegex(output, 'remcsumrx')
         self.assertRegex(output, 'gbp')
+
+        output = subprocess.check_output(['bridge', 'fdb', 'show', 'dev', 'vxlan99']).rstrip().decode('utf-8')
+        print(output)
+        self.assertRegex(output, '00:11:22:33:44:55 dst 10.0.0.5 self permanent')
+        self.assertRegex(output, '00:11:22:33:44:66 dst 10.0.0.6 self permanent')
+        self.assertRegex(output, '00:11:22:33:44:77 dst 10.0.0.7 self permanent')
 
     def test_macsec(self):
         self.copy_unit_to_networkd_unit_path('25-macsec.netdev', '25-macsec.network', '25-macsec.key',
@@ -1872,6 +1880,8 @@ class NetworkdNetworkDHCPClientTests(unittest.TestCase, Utilities):
         'dhcp-client-route-metric.network',
         'dhcp-client-route-table.network',
         'dhcp-client-vrf.network',
+        'dhcp-client-with-ipv4ll-fallback-with-dhcp-server.network',
+        'dhcp-client-with-ipv4ll-fallback-without-dhcp-server.network',
         'dhcp-client.network',
         'dhcp-server-veth-peer.network',
         'dhcp-v4-server-veth-peer.network',
@@ -1890,16 +1900,21 @@ class NetworkdNetworkDHCPClientTests(unittest.TestCase, Utilities):
 
     def test_dhcp_client_ipv6_only(self):
         self.copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network', 'dhcp-client-ipv6-only.network')
-        self.start_networkd()
 
-        self.assertTrue(self.link_exits('veth99'))
-
+        self.start_networkd(0)
+        self.wait_online(['veth-peer:carrier'])
         self.start_dnsmasq()
+        self.wait_online(['veth99:routable', 'veth-peer:routable'])
 
         output = subprocess.check_output(['networkctl', 'status', 'veth99']).rstrip().decode('utf-8')
         print(output)
         self.assertRegex(output, '2600::')
         self.assertNotRegex(output, '192.168.5')
+
+        # Confirm that ipv6 token is not set in the kernel
+        output = subprocess.check_output(['ip', 'token', 'show', 'dev', 'veth99']).rstrip().decode('utf-8')
+        print(output)
+        self.assertRegex(output, 'token :: dev veth99')
 
     def test_dhcp_client_ipv4_only(self):
         self.copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network', 'dhcp-client-ipv4-only-ipv6-disabled.network')
@@ -2167,6 +2182,61 @@ class NetworkdNetworkDHCPClientTests(unittest.TestCase, Utilities):
         output = subprocess.check_output(['ip', 'route', 'list', 'dev', 'veth99', '192.168.100.0/24']).rstrip().decode('utf-8')
         print(output)
         self.assertRegex(output, 'onlink')
+
+    def test_dhcp_client_with_ipv4ll_fallback_with_dhcp_server(self):
+        self.copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network',
+                                             'dhcp-client-with-ipv4ll-fallback-with-dhcp-server.network')
+        self.start_networkd(0)
+        self.wait_online(['veth-peer:carrier'])
+        self.start_dnsmasq(lease_time='2m')
+        self.wait_online(['veth99:routable', 'veth-peer:routable'])
+
+        output = subprocess.check_output(['ip', 'address', 'show', 'dev', 'veth99']).rstrip().decode('utf-8')
+        print(output)
+
+        output = subprocess.check_output(['ip', '-6', 'address', 'show', 'dev', 'veth99', 'scope', 'global', 'dynamic']).rstrip().decode('utf-8')
+        self.assertNotRegex(output, 'inet6 2600::[0-9a-f]*/128 scope global dynamic')
+        output = subprocess.check_output(['ip', '-6', 'address', 'show', 'dev', 'veth99', 'scope', 'link']).rstrip().decode('utf-8')
+        self.assertRegex(output, 'inet6 .* scope link')
+        output = subprocess.check_output(['ip', '-4', 'address', 'show', 'dev', 'veth99', 'scope', 'global', 'dynamic']).rstrip().decode('utf-8')
+        self.assertRegex(output, 'inet 192.168.5.[0-9]*/24 brd 192.168.5.255 scope global dynamic veth99')
+        output = subprocess.check_output(['ip', '-4', 'address', 'show', 'dev', 'veth99', 'scope', 'link']).rstrip().decode('utf-8')
+        self.assertNotRegex(output, 'inet .* scope link')
+
+        print('Wait for the dynamic address to be expired')
+        time.sleep(130)
+
+        output = subprocess.check_output(['ip', 'address', 'show', 'dev', 'veth99']).rstrip().decode('utf-8')
+        print(output)
+
+        output = subprocess.check_output(['ip', '-6', 'address', 'show', 'dev', 'veth99', 'scope', 'global', 'dynamic']).rstrip().decode('utf-8')
+        self.assertNotRegex(output, 'inet6 2600::[0-9a-f]*/128 scope global dynamic')
+        output = subprocess.check_output(['ip', '-6', 'address', 'show', 'dev', 'veth99', 'scope', 'link']).rstrip().decode('utf-8')
+        self.assertRegex(output, 'inet6 .* scope link')
+        output = subprocess.check_output(['ip', '-4', 'address', 'show', 'dev', 'veth99', 'scope', 'global', 'dynamic']).rstrip().decode('utf-8')
+        self.assertRegex(output, 'inet 192.168.5.[0-9]*/24 brd 192.168.5.255 scope global dynamic veth99')
+        output = subprocess.check_output(['ip', '-4', 'address', 'show', 'dev', 'veth99', 'scope', 'link']).rstrip().decode('utf-8')
+        self.assertNotRegex(output, 'inet .* scope link')
+
+        self.search_words_in_dnsmasq_log('DHCPOFFER', show_all=True)
+
+    def test_dhcp_client_with_ipv4ll_fallback_without_dhcp_server(self):
+        self.copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network',
+                                             'dhcp-client-with-ipv4ll-fallback-without-dhcp-server.network')
+        self.start_networkd(0)
+        self.wait_online(['veth99:degraded', 'veth-peer:routable'])
+
+        output = subprocess.check_output(['ip', 'address', 'show', 'dev', 'veth99']).rstrip().decode('utf-8')
+        print(output)
+
+        output = subprocess.check_output(['ip', '-6', 'address', 'show', 'dev', 'veth99', 'scope', 'global', 'dynamic']).rstrip().decode('utf-8')
+        self.assertNotRegex(output, 'inet6 2600::[0-9a-f]*/128 scope global dynamic')
+        output = subprocess.check_output(['ip', '-6', 'address', 'show', 'dev', 'veth99', 'scope', 'link']).rstrip().decode('utf-8')
+        self.assertRegex(output, 'inet6 .* scope link')
+        output = subprocess.check_output(['ip', '-4', 'address', 'show', 'dev', 'veth99', 'scope', 'global', 'dynamic']).rstrip().decode('utf-8')
+        self.assertNotRegex(output, 'inet 192.168.5.[0-9]*/24 brd 192.168.5.255 scope global dynamic veth99')
+        output = subprocess.check_output(['ip', '-4', 'address', 'show', 'dev', 'veth99', 'scope', 'link']).rstrip().decode('utf-8')
+        self.assertRegex(output, 'inet .* scope link')
 
 if __name__ == '__main__':
     unittest.main(testRunner=unittest.TextTestRunner(stream=sys.stdout,

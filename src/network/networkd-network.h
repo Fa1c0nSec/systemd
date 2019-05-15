@@ -8,12 +8,14 @@
 #include "conf-parser.h"
 #include "dhcp-identifier.h"
 #include "hashmap.h"
+#include "netdev/bridge.h"
 #include "netdev/netdev.h"
 #include "networkd-address-label.h"
 #include "networkd-address.h"
 #include "networkd-brvlan.h"
 #include "networkd-fdb.h"
 #include "networkd-ipv6-proxy-ndp.h"
+#include "networkd-lldp-rx.h"
 #include "networkd-lldp-tx.h"
 #include "networkd-neighbor.h"
 #include "networkd-radv.h"
@@ -58,14 +60,6 @@ typedef enum DHCPUseDomains {
         _DHCP_USE_DOMAINS_INVALID = -1,
 } DHCPUseDomains;
 
-typedef enum LLDPMode {
-        LLDP_MODE_NO = 0,
-        LLDP_MODE_YES = 1,
-        LLDP_MODE_ROUTERS_ONLY = 2,
-        _LLDP_MODE_MAX,
-        _LLDP_MODE_INVALID = -1,
-} LLDPMode;
-
 typedef struct DUID {
         /* Value of Type in [DHCP] section */
         DUIDType type;
@@ -92,6 +86,8 @@ struct Network {
         char *filename;
         char *name;
 
+        unsigned n_ref;
+
         Set *match_mac;
         char **match_path;
         char **match_driver;
@@ -116,6 +112,7 @@ struct Network {
         char *dhcp_vendor_class_identifier;
         char **dhcp_user_class;
         char *dhcp_hostname;
+        uint64_t dhcp_max_attempts;
         unsigned dhcp_route_metric;
         uint32_t dhcp_route_table;
         uint16_t dhcp_client_port;
@@ -131,7 +128,9 @@ struct Network {
         bool rapid_commit;
         bool dhcp_use_hostname;
         bool dhcp_route_table_set;
+        bool dhcp_send_release;
         DHCPUseDomains dhcp_use_domains;
+        Set *dhcp_black_listed_ip;
 
         /* DHCP Server Support */
         bool dhcp_server;
@@ -178,8 +177,11 @@ struct Network {
         int multicast_to_unicast;
         int neighbor_suppression;
         int learning;
+        int bridge_proxy_arp;
+        int bridge_proxy_arp_wifi;
         uint32_t cost;
         uint16_t priority;
+        MulticastRouter multicast_router;
 
         bool use_br_vlan;
         uint16_t pvid;
@@ -274,13 +276,11 @@ struct Network {
 
         char **ntp;
         char **bind_carrier;
-
-        LIST_FIELDS(Network, networks);
 };
 
-void network_free(Network *network);
-
-DEFINE_TRIVIAL_CLEANUP_FUNC(Network*, network_free);
+Network *network_ref(Network *network);
+Network *network_unref(Network *network);
+DEFINE_TRIVIAL_CLEANUP_FUNC(Network*, network_unref);
 
 int network_load(Manager *manager);
 int network_load_one(Manager *manager, const char *filename);
@@ -304,17 +304,18 @@ CONFIG_PARSER_PROTOTYPE(config_parse_ipv6_privacy_extensions);
 CONFIG_PARSER_PROTOTYPE(config_parse_hostname);
 CONFIG_PARSER_PROTOTYPE(config_parse_timezone);
 CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_server_dns);
+CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_black_listed_ip_address);
 CONFIG_PARSER_PROTOTYPE(config_parse_radv_dns);
 CONFIG_PARSER_PROTOTYPE(config_parse_radv_search_domains);
 CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_server_ntp);
 CONFIG_PARSER_PROTOTYPE(config_parse_dnssec_negative_trust_anchors);
 CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_use_domains);
-CONFIG_PARSER_PROTOTYPE(config_parse_lldp_mode);
 CONFIG_PARSER_PROTOTYPE(config_parse_section_route_table);
 CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_user_class);
 CONFIG_PARSER_PROTOTYPE(config_parse_ntp);
 CONFIG_PARSER_PROTOTYPE(config_parse_iaid);
 CONFIG_PARSER_PROTOTYPE(config_parse_required_for_online);
+CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_max_attempts);
 /* Legacy IPv4LL support */
 CONFIG_PARSER_PROTOTYPE(config_parse_ipv4ll);
 
@@ -330,9 +331,6 @@ IPv6PrivacyExtensions ipv6_privacy_extensions_from_string(const char *s) _pure_;
 
 const char* dhcp_use_domains_to_string(DHCPUseDomains p) _const_;
 DHCPUseDomains dhcp_use_domains_from_string(const char *s) _pure_;
-
-const char* lldp_mode_to_string(LLDPMode m) _const_;
-LLDPMode lldp_mode_from_string(const char *s) _pure_;
 
 const char* radv_prefix_delegation_to_string(RADVPrefixDelegation i) _const_;
 RADVPrefixDelegation radv_prefix_delegation_from_string(const char *s) _pure_;

@@ -170,6 +170,8 @@ static const NLType rtnl_link_info_data_vxlan_types[] = {
         [IFLA_VXLAN_COLLECT_METADATA]  = { .type = NETLINK_TYPE_U8 },
         [IFLA_VXLAN_LABEL]             = { .type = NETLINK_TYPE_U32 },
         [IFLA_VXLAN_GPE]               = { .type = NETLINK_TYPE_FLAG },
+        [IFLA_VXLAN_TTL_INHERIT]       = { .type = NETLINK_TYPE_FLAG },
+        [IFLA_VXLAN_DF]                = { .type = NETLINK_TYPE_U8 },
 };
 
 static const NLType rtnl_bond_arp_target_types[] = {
@@ -299,6 +301,8 @@ static const NLType rtnl_link_info_data_geneve_types[] = {
         [IFLA_GENEVE_UDP_ZERO_CSUM6_TX] = { .type = NETLINK_TYPE_U8 },
         [IFLA_GENEVE_UDP_ZERO_CSUM6_RX] = { .type = NETLINK_TYPE_U8 },
         [IFLA_GENEVE_LABEL]             = { .type = NETLINK_TYPE_U32 },
+        [IFLA_GENEVE_TTL_INHERIT]       = { .type = NETLINK_TYPE_U8 },
+        [IFLA_GENEVE_DF]                = { .type = NETLINK_TYPE_U8 },
 };
 
 static const NLType rtnl_link_info_data_can_types[] = {
@@ -583,20 +587,22 @@ static const NLTypeSystem rtnl_address_type_system = {
 /* RTM_METRICS --- array of struct rtattr with types of RTAX_* */
 
 static const NLType rtnl_route_metrics_types[] = {
-        [RTAX_MTU]               = { .type = NETLINK_TYPE_U32 },
-        [RTAX_WINDOW]            = { .type = NETLINK_TYPE_U32 },
-        [RTAX_RTT]               = { .type = NETLINK_TYPE_U32 },
-        [RTAX_RTTVAR]            = { .type = NETLINK_TYPE_U32 },
-        [RTAX_SSTHRESH]          = { .type = NETLINK_TYPE_U32 },
-        [RTAX_CWND]              = { .type = NETLINK_TYPE_U32 },
-        [RTAX_ADVMSS]            = { .type = NETLINK_TYPE_U32 },
-        [RTAX_REORDERING]        = { .type = NETLINK_TYPE_U32 },
-        [RTAX_HOPLIMIT]          = { .type = NETLINK_TYPE_U32 },
-        [RTAX_INITCWND]          = { .type = NETLINK_TYPE_U32 },
-        [RTAX_FEATURES]          = { .type = NETLINK_TYPE_U32 },
-        [RTAX_RTO_MIN]           = { .type = NETLINK_TYPE_U32 },
-        [RTAX_INITRWND]          = { .type = NETLINK_TYPE_U32 },
-        [RTAX_QUICKACK]          = { .type = NETLINK_TYPE_U32 },
+        [RTAX_MTU]                = { .type = NETLINK_TYPE_U32 },
+        [RTAX_WINDOW]             = { .type = NETLINK_TYPE_U32 },
+        [RTAX_RTT]                = { .type = NETLINK_TYPE_U32 },
+        [RTAX_RTTVAR]             = { .type = NETLINK_TYPE_U32 },
+        [RTAX_SSTHRESH]           = { .type = NETLINK_TYPE_U32 },
+        [RTAX_CWND]               = { .type = NETLINK_TYPE_U32 },
+        [RTAX_ADVMSS]             = { .type = NETLINK_TYPE_U32 },
+        [RTAX_REORDERING]         = { .type = NETLINK_TYPE_U32 },
+        [RTAX_HOPLIMIT]           = { .type = NETLINK_TYPE_U32 },
+        [RTAX_INITCWND]           = { .type = NETLINK_TYPE_U32 },
+        [RTAX_FEATURES]           = { .type = NETLINK_TYPE_U32 },
+        [RTAX_RTO_MIN]            = { .type = NETLINK_TYPE_U32 },
+        [RTAX_INITRWND]           = { .type = NETLINK_TYPE_U32 },
+        [RTAX_QUICKACK]           = { .type = NETLINK_TYPE_U32 },
+        [RTAX_CC_ALGO]            = { .type = NETLINK_TYPE_U32 },
+        [RTAX_FASTOPEN_NO_COOKIE] = { .type = NETLINK_TYPE_U32 },
 };
 
 static const NLTypeSystem rtnl_route_metrics_type_system = {

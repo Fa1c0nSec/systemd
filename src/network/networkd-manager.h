@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
-#include <arpa/inet.h>
-
 #include "sd-bus.h"
 #include "sd-device.h"
 #include "sd-event.h"
@@ -37,9 +35,8 @@ struct Manager {
 
         Hashmap *links;
         Hashmap *netdevs;
-        Hashmap *networks_by_name;
+        OrderedHashmap *networks;
         Hashmap *dhcp6_prefixes;
-        LIST_HEAD(Network, networks);
         LIST_HEAD(AddressPool, address_pools);
 
         usec_t network_dirs_ts_usec;

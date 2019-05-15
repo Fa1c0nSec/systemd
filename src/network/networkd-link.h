@@ -132,13 +132,14 @@ int get_product_uuid_handler(sd_bus_message *m, void *userdata, sd_bus_error *re
 
 Link *link_unref(Link *link);
 Link *link_ref(Link *link);
+DEFINE_TRIVIAL_CLEANUP_FUNC(Link*, link_unref);
 DEFINE_TRIVIAL_DESTRUCTOR(link_netlink_destroy_callback, Link, link_unref);
 
 int link_get(Manager *m, int ifindex, Link **ret);
 int link_add(Manager *manager, sd_netlink_message *message, Link **ret);
 void link_drop(Link *link);
 
-int link_down(Link *link);
+int link_down(Link *link, link_netlink_message_handler_t callback);
 
 void link_enter_failed(Link *link);
 int link_initialized(Link *link, sd_device *device);
@@ -160,6 +161,9 @@ int link_ipv6ll_gained(Link *link, const struct in6_addr *address);
 int link_set_mtu(Link *link, uint32_t mtu, bool force);
 
 int ipv4ll_configure(Link *link);
+bool link_ipv4ll_enabled(Link *link);
+bool link_ipv4ll_fallback_enabled(Link *link);
+
 int dhcp4_configure(Link *link);
 int dhcp4_set_client_identifier(Link *link);
 int dhcp4_set_promote_secondaries(Link *link);
@@ -167,6 +171,8 @@ int dhcp6_request_prefix_delegation(Link *link);
 int dhcp6_configure(Link *link);
 int dhcp6_request_address(Link *link, int ir);
 int dhcp6_lease_pd_prefix_lost(sd_dhcp6_client *client, Link* link);
+
+int link_stop_clients(Link *link);
 
 const char* link_state_to_string(LinkState s) _const_;
 LinkState link_state_from_string(const char *s) _pure_;

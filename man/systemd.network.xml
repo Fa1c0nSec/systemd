@@ -326,9 +326,16 @@
           <term><varname>LinkLocalAddressing=</varname></term>
           <listitem>
             <para>Enables link-local address autoconfiguration. Accepts <literal>yes</literal>,
-            <literal>no</literal>, <literal>ipv4</literal>, or <literal>ipv6</literal>. If
-            <varname>Bridge=</varname> is set, defaults to <literal>no</literal>, and if not,
-            defaults to <literal>ipv6</literal>.</para>
+            <literal>no</literal>, <literal>ipv4</literal>, <literal>ipv6</literal>,
+            <literal>fallback</literal>, or <literal>ipv4-fallback</literal>. If
+            <literal>fallback</literal> or <literal>ipv4-fallback</literal> is specified, then an IPv4
+            link-local address is configured only when DHCPv4 fails. If <literal>fallback</literal>,
+            an IPv6 link-local address is always configured, and if <literal>ipv4-fallback</literal>,
+            the address is not configured. Note that, the fallback mechanism works only when DHCPv4
+            client is enabled, that is, it requires <literal>DHCP=yes</literal> or
+            <literal>DHCP=ipv4</literal>. If <varname>Bridge=</varname> is set, defaults to
+            <literal>no</literal>, and if not, defaults to <literal>ipv6</literal>.
+            </para>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -1212,6 +1219,14 @@
           </listitem>
         </varlistentry>
         <varlistentry>
+          <term><varname>FastOpenNoCookie=</varname></term>
+          <listitem>
+            <para>Takes a boolean. When true enables TCP fastopen without a cookie on a per-route basis.
+            When unset, the kernel's default will be used.
+            </para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
         <term><varname>MTUBytes=</varname></term>
         <listitem>
           <para>The maximum transmission unit in bytes to set for the
@@ -1390,6 +1405,16 @@
         </varlistentry>
 
         <varlistentry>
+          <term><varname>MaxAttempts=</varname></term>
+          <listitem>
+            <para>Specifies how many times the DHCPv4 client configuration should be attempted. Takes a
+            number or <literal>infinity</literal>. Defaults to <literal>infinity</literal>.
+            Note that the time between retries is increased exponentially, so the network will not be
+            overloaded even if this number is high.</para>
+          </listitem>
+        </varlistentry>
+
+        <varlistentry>
           <term><varname>DUIDType=</varname></term>
           <listitem>
             <para>Override the global <varname>DUIDType</varname> setting for this network. See
@@ -1450,6 +1475,14 @@
           <term><varname>ListenPort=</varname></term>
           <listitem>
             <para>Allow setting custom port for the DHCP client to listen on.</para>
+          </listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><varname>SendRelease=</varname></term>
+          <listitem>
+            <para>When true, the DHCPv4 client sends a DHCP release packet when it stops.
+            Defaults to false.</para>
           </listitem>
         </varlistentry>
 
@@ -1546,6 +1579,13 @@
           <listitem>
             <para>When true (the default), the onlink prefix received in the Router Advertisement will be used and take
             precedence over any statically configured ones.</para>
+          </listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><varname>BlackList=</varname></term>
+          <listitem>
+            <para>A whitespace-separated list of IPv4 addresses. DHCP offers from servers in the list are rejected.</para>
           </listitem>
         </varlistentry>
 
@@ -1877,6 +1917,32 @@
           </listitem>
         </varlistentry>
         <varlistentry>
+          <term><varname>ProxyARP=</varname></term>
+          <listitem>
+            <para>Takes a boolean. Configures whether proxy ARP to be enabled on this port.
+            When unset, the kernel's default will be used.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>ProxyARPWiFi=</varname></term>
+          <listitem>
+            <para>Takes a boolean. Configures whether proxy ARP to be enabled on this port
+            which meets extended requirements by IEEE 802.11 and Hotspot 2.0 specifications.
+            When unset, the kernel's default will be used.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>MulticastRouter=</varname></term>
+          <listitem>
+            <para>Configures this port for having multicast routers attached. A port with a multicast
+            router will receive all multicast traffic. Takes one of <literal>no</literal>
+            to disable multicast routers on this port, <literal>query</literal> to let the system detect
+            the presence of routers, <literal>permanent</literal> to permanently enable multicast traffic
+            forwarding on this port, or <literal>temporary</literal> to enable multicast routers temporarily
+            on this port, not depending on incoming queries. When unset, the kernel's default will be used.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
           <term><varname>Cost=</varname></term>
           <listitem>
             <para>Sets the "cost" of sending packets of this interface.
@@ -1914,11 +1980,38 @@
           </listitem>
         </varlistentry>
         <varlistentry>
+          <term><varname>Destination=</varname></term>
+          <listitem>
+            <para>Takes an IP address of the destination VXLAN tunnel endpoint.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
           <term><varname>VLANId=</varname></term>
           <listitem>
             <para>The VLAN ID for the new static MAC table entry. If
             omitted, no VLAN ID information is appended to the new static MAC
             table entry.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>VNI=</varname></term>
+          <listitem>
+            <para>The VXLAN Network Identifier (or VXLAN Segment ID) to use to connect to
+            the remote VXLAN tunnel endpoint. Takes a number in the range 1-16777215.
+            Defaults to unset.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>AssociatedWith=</varname></term>
+          <listitem>
+            <para>Specifies where the address is associated with. Takes one of <literal>use</literal>,
+            <literal>self</literal>, <literal>master</literal> or <literal>router</literal>.
+            <literal>use</literal> means the address is in use. User space can use this option to
+            indicate to the kernel that the fdb entry is in use. <literal>self</literal> means
+            the address is associated with the port drivers fdb. Usually hardware. <literal>master</literal>
+            means the address is associated with master devices fdb. <literal>router</literal> means
+            the destination address is associated with a router. Note that it's valid if the referenced
+            device is a VXLAN type device and has route shortcircuit enabled. Defaults to <literal>self</literal>.</para>
           </listitem>
         </varlistentry>
       </variablelist>

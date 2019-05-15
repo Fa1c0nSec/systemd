@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <netinet/ether.h>
+#include <netinet/in.h>
 #include <linux/if.h>
 
 #include "network-internal.h"
@@ -175,7 +175,7 @@ static void ipv4ll_handler(sd_ipv4ll *ll, int event, void *userdata) {
 
                         r = sd_ipv4ll_restart(ll);
                         if (r < 0)
-                                log_link_warning(link, "Could not acquire IPv4 link-local address");
+                                log_link_warning_errno(link, r, "Could not acquire IPv4 link-local address: %m");
                         break;
                 case SD_IPV4LL_EVENT_BIND:
                         r = ipv4ll_address_claimed(ll, link);
@@ -197,7 +197,7 @@ int ipv4ll_configure(Link *link) {
 
         assert(link);
         assert(link->network);
-        assert(link->network->link_local & ADDRESS_FAMILY_IPV4);
+        assert(link->network->link_local & (ADDRESS_FAMILY_IPV4 | ADDRESS_FAMILY_FALLBACK_IPV4));
 
         if (!link->ipv4ll) {
                 r = sd_ipv4ll_new(&link->ipv4ll);

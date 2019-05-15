@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <netinet/ether.h>
+#include <netinet/in.h>
 #include <linux/if.h>
 
 #include "alloc-util.h"
@@ -511,31 +511,76 @@ static int dhcp_lease_acquired(sd_dhcp_client *client, Link *link) {
 
         return 0;
 }
-static void dhcp4_handler(sd_dhcp_client *client, int event, void *userdata) {
+
+static int dhcp_server_is_black_listed(Link *link, sd_dhcp_client *client) {
+        sd_dhcp_lease *lease;
+        struct in_addr addr;
+        int r;
+
+        assert(link);
+        assert(link->network);
+        assert(client);
+
+        r = sd_dhcp_client_get_lease(client, &lease);
+        if (r < 0)
+                return log_link_error_errno(link, r, "Failed to get DHCP lease: %m");
+
+        r = sd_dhcp_lease_get_server_identifier(lease, &addr);
+        if (r < 0)
+                return log_link_debug_errno(link, r, "Failed to get DHCP server ip address: %m");
+
+        if (set_contains(link->network->dhcp_black_listed_ip, UINT32_TO_PTR(addr.s_addr))) {
+                log_struct(LOG_DEBUG,
+                           LOG_LINK_INTERFACE(link),
+                           LOG_LINK_MESSAGE(link, "DHCPv4 ip '%u.%u.%u.%u' found in black listed ip addresses, ignoring offer",
+                                            ADDRESS_FMT_VAL(addr)));
+                return true;
+        }
+
+        return false;
+}
+
+static int dhcp4_handler(sd_dhcp_client *client, int event, void *userdata) {
         Link *link = userdata;
-        int r = 0;
+        int r;
 
         assert(link);
         assert(link->network);
         assert(link->manager);
 
         if (IN_SET(link->state, LINK_STATE_FAILED, LINK_STATE_LINGER))
-                return;
+                return 0;
 
         switch (event) {
-                case SD_DHCP_CLIENT_EVENT_EXPIRED:
                 case SD_DHCP_CLIENT_EVENT_STOP:
+
+                        if (link_ipv4ll_fallback_enabled(link)) {
+                                assert(link->ipv4ll);
+
+                                log_link_debug(link, "DHCP client is stopped. Acquiring IPv4 link-local address");
+
+                                r = sd_ipv4ll_start(link->ipv4ll);
+                                if (r < 0)
+                                        return log_link_warning_errno(link, r, "Could not acquire IPv4 link-local address: %m");
+                        }
+
+                        if (link->network->dhcp_send_release)
+                                (void) sd_dhcp_client_send_release(client);
+
+                        _fallthrough_;
+                case SD_DHCP_CLIENT_EVENT_EXPIRED:
                 case SD_DHCP_CLIENT_EVENT_IP_CHANGE:
+
                         if (link->network->dhcp_critical) {
                                 log_link_error(link, "DHCPv4 connection considered system critical, ignoring request to reconfigure it.");
-                                return;
+                                return 0;
                         }
 
                         if (link->dhcp_lease) {
                                 r = dhcp_lease_lost(link);
                                 if (r < 0) {
                                         link_enter_failed(link);
-                                        return;
+                                        return r;
                                 }
                         }
 
@@ -543,7 +588,7 @@ static void dhcp4_handler(sd_dhcp_client *client, int event, void *userdata) {
                                 r = dhcp_lease_acquired(client, link);
                                 if (r < 0) {
                                         link_enter_failed(link);
-                                        return;
+                                        return r;
                                 }
                         }
 
@@ -552,15 +597,22 @@ static void dhcp4_handler(sd_dhcp_client *client, int event, void *userdata) {
                         r = dhcp_lease_renew(client, link);
                         if (r < 0) {
                                 link_enter_failed(link);
-                                return;
+                                return r;
                         }
                         break;
                 case SD_DHCP_CLIENT_EVENT_IP_ACQUIRE:
                         r = dhcp_lease_acquired(client, link);
                         if (r < 0) {
                                 link_enter_failed(link);
-                                return;
+                                return r;
                         }
+                        break;
+                case SD_DHCP_CLIENT_EVENT_SELECTING:
+                        r = dhcp_server_is_black_listed(link, client);
+                        if (r < 0)
+                                return r;
+                        if (r != 0)
+                                return -ENOMSG;
                         break;
                 default:
                         if (event < 0)
@@ -570,7 +622,7 @@ static void dhcp4_handler(sd_dhcp_client *client, int event, void *userdata) {
                         break;
         }
 
-        return;
+        return 0;
 }
 
 static int dhcp4_set_hostname(Link *link) {
@@ -815,6 +867,12 @@ int dhcp4_configure(Link *link) {
                 r = sd_dhcp_client_set_client_port(link->dhcp_client, link->network->dhcp_client_port);
                 if (r < 0)
                         return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set listen port: %m");
+        }
+
+        if (link->network->dhcp_max_attempts > 0) {
+                r = sd_dhcp_client_set_max_attempts(link->dhcp_client, link->network->dhcp_max_attempts);
+                if (r < 0)
+                        return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set max attempts: %m");
         }
 
         return dhcp4_set_client_identifier(link);

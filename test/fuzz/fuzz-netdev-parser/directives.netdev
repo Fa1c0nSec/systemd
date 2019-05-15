@@ -11,6 +11,7 @@ ListenPort=
 PrivateKey=
 PrivateKeyFile=
 FwMark=
+FirewallMark=
 [MACVTAP]
 Mode=
 [Match]
@@ -31,6 +32,7 @@ FlowLabel=
 UDP6ZeroChecksumRx=
 Remote=
 UDP6ZeroCheckSumRx=
+IPDoNotFragment=
 [Bridge]
 ForwardDelaySec=
 HelloTimeSec=
@@ -92,6 +94,7 @@ Group=
 FDBAgeingSec=
 MacLearning=
 Id=
+VNI=
 RemoteChecksumRx=
 TOS=
 L2MissNotification=
@@ -99,6 +102,7 @@ UDP6ZeroChecksumTx=
 UDP6ZeroCheckSumRx=
 UDPCheckSum=
 GroupPolicyExtension=
+GenericProtocolExtension=
 MaximumFDBEntries=
 TTL=
 DestinationPort=
@@ -106,6 +110,7 @@ ReduceARPProxy=
 PortRange=
 UDPChecksum=
 UDP6ZeroCheckSumTx=
+IPDoNotFragment=
 [VXCAN]
 Peer=
 [Bond]
@@ -174,7 +179,7 @@ SessionId=
 PeerSessionId=
 Layer2SpecificHeader=
 Name=
-[MACSEC]
+[MACsec]
 Port=
 Encrypt=
 [MACsecReceiveAssociation]

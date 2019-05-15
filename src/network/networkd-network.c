@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
+#include <net/if.h>
+#include <netinet/in.h>
 #include <linux/netdevice.h>
 
 #include "alloc-util.h"
@@ -236,6 +238,13 @@ int network_verify(Network *network) {
         if (network->link_local < 0)
                 network->link_local = network->bridge ? ADDRESS_FAMILY_NO : ADDRESS_FAMILY_IPV6;
 
+        if (FLAGS_SET(network->link_local, ADDRESS_FAMILY_FALLBACK_IPV4) &&
+            !FLAGS_SET(network->dhcp, ADDRESS_FAMILY_IPV4)) {
+                log_warning("%s: fallback assignment of IPv4 link local address is enabled but DHCPv4 is disabled. "
+                            "Disabling the fallback assignment.", network->filename);
+                SET_FLAG(network->link_local, ADDRESS_FAMILY_FALLBACK_IPV4, false);
+        }
+
         if (network->ipv6_accept_ra < 0 && network->bridge)
                 network->ipv6_accept_ra = false;
 
@@ -291,7 +300,7 @@ int network_verify(Network *network) {
 
 int network_load_one(Manager *manager, const char *filename) {
         _cleanup_free_ char *fname = NULL, *name = NULL;
-        _cleanup_(network_freep) Network *network = NULL;
+        _cleanup_(network_unrefp) Network *network = NULL;
         _cleanup_fclose_ FILE *file = NULL;
         const char *dropin_dirname;
         char *d;
@@ -337,6 +346,9 @@ int network_load_one(Manager *manager, const char *filename) {
                 .filename = TAKE_PTR(fname),
                 .name = TAKE_PTR(name),
 
+                .manager = manager,
+                .n_ref = 1,
+
                 .required_for_online = true,
                 .required_operstate_for_online = LINK_OPERSTATE_DEGRADED,
                 .dhcp = ADDRESS_FAMILY_NO,
@@ -349,7 +361,7 @@ int network_load_one(Manager *manager, const char *filename) {
                 /* To enable/disable RFC7844 Anonymity Profiles */
                 .dhcp_anonymize = false,
                 .dhcp_route_metric = DHCP_ROUTE_METRIC,
-                /* NOTE: this var might be overwrite by network_apply_anonymize_if_set */
+                /* NOTE: this var might be overwritten by network_apply_anonymize_if_set */
                 .dhcp_client_identifier = DHCP_CLIENT_ID_DUID,
                 .dhcp_route_table = RT_TABLE_MAIN,
                 .dhcp_route_table_set = false,
@@ -376,7 +388,10 @@ int network_load_one(Manager *manager, const char *filename) {
                 .multicast_to_unicast = -1,
                 .neighbor_suppression = -1,
                 .learning = -1,
+                .bridge_proxy_arp = -1,
+                .bridge_proxy_arp_wifi = -1,
                 .priority = LINK_BRIDGE_PORT_PRIORITY_INVALID,
+                .multicast_router = _MULTICAST_ROUTER_INVALID,
 
                 .lldp_mode = LLDP_MODE_ROUTERS_ONLY,
 
@@ -439,14 +454,11 @@ int network_load_one(Manager *manager, const char *filename) {
         if (r < 0)
                 log_warning_errno(r, "%s: Failed to add IPv4LL route, ignoring: %m", network->filename);
 
-        LIST_PREPEND(networks, manager->networks, network);
-        network->manager = manager;
-
-        r = hashmap_ensure_allocated(&manager->networks_by_name, &string_hash_ops);
+        r = ordered_hashmap_ensure_allocated(&manager->networks, &string_hash_ops);
         if (r < 0)
                 return r;
 
-        r = hashmap_put(manager->networks_by_name, network->name, network);
+        r = ordered_hashmap_put(manager->networks, network->name, network);
         if (r < 0)
                 return r;
 
@@ -458,21 +470,19 @@ int network_load_one(Manager *manager, const char *filename) {
 }
 
 int network_load(Manager *manager) {
-        Network *network;
         _cleanup_strv_free_ char **files = NULL;
         char **f;
         int r;
 
         assert(manager);
 
-        while ((network = manager->networks))
-                network_free(network);
+        ordered_hashmap_clear_with_destructor(manager->networks, network_unref);
 
         r = conf_files_list_strv(&files, ".network", NULL, 0, NETWORK_DIRS);
         if (r < 0)
                 return log_error_errno(r, "Failed to enumerate network files: %m");
 
-        STRV_FOREACH_BACKWARDS(f, files) {
+        STRV_FOREACH(f, files) {
                 r = network_load_one(manager, *f);
                 if (r < 0)
                         return r;
@@ -481,7 +491,7 @@ int network_load(Manager *manager) {
         return 0;
 }
 
-void network_free(Network *network) {
+static Network *network_free(Network *network) {
         IPv6ProxyNDPAddress *ipv6_proxy_ndp_address;
         RoutingPolicyRule *rule;
         FdbEntry *fdb_entry;
@@ -492,7 +502,7 @@ void network_free(Network *network) {
         Route *route;
 
         if (!network)
-                return;
+                return NULL;
 
         free(network->filename);
 
@@ -507,7 +517,7 @@ void network_free(Network *network) {
         free(network->dhcp_vendor_class_identifier);
         strv_free(network->dhcp_user_class);
         free(network->dhcp_hostname);
-
+        set_free(network->dhcp_black_listed_ip);
         free(network->mac);
 
         strv_free(network->ntp);
@@ -561,11 +571,8 @@ void network_free(Network *network) {
         hashmap_free(network->rules_by_section);
 
         if (network->manager) {
-                if (network->manager->networks)
-                        LIST_REMOVE(networks, network->manager->networks, network);
-
-                if (network->manager->networks_by_name && network->name)
-                        hashmap_remove(network->manager->networks_by_name, network->name);
+                if (network->manager->networks && network->name)
+                        ordered_hashmap_remove(network->manager->networks, network->name);
 
                 if (network->manager->duids_requesting_uuid)
                         set_remove(network->manager->duids_requesting_uuid, &network->duid);
@@ -579,8 +586,10 @@ void network_free(Network *network) {
 
         set_free_free(network->dnssec_negative_trust_anchors);
 
-        free(network);
+        return mfree(network);
 }
+
+DEFINE_TRIVIAL_REF_UNREF_FUNC(Network, network, network_free);
 
 int network_get_by_name(Manager *manager, const char *name, Network **ret) {
         Network *network;
@@ -589,7 +598,7 @@ int network_get_by_name(Manager *manager, const char *name, Network **ret) {
         assert(name);
         assert(ret);
 
-        network = hashmap_get(manager->networks_by_name, name);
+        network = ordered_hashmap_get(manager->networks, name);
         if (!network)
                 return -ENOENT;
 
@@ -603,6 +612,7 @@ int network_get(Manager *manager, sd_device *device,
                 Network **ret) {
         const char *path = NULL, *driver = NULL, *devtype = NULL;
         Network *network;
+        Iterator i;
 
         assert(manager);
         assert(ret);
@@ -615,7 +625,7 @@ int network_get(Manager *manager, sd_device *device,
                 (void) sd_device_get_devtype(device, &devtype);
         }
 
-        LIST_FOREACH(networks, network, manager->networks) {
+        ORDERED_HASHMAP_FOREACH(network, manager->networks, i)
                 if (net_match_config(network->match_mac, network->match_path,
                                      network->match_driver, network->match_type,
                                      network->match_name,
@@ -638,7 +648,6 @@ int network_get(Manager *manager, sd_device *device,
                         *ret = network;
                         return 0;
                 }
-        }
 
         *ret = NULL;
 
@@ -649,7 +658,7 @@ int network_apply(Network *network, Link *link) {
         assert(network);
         assert(link);
 
-        link->network = network;
+        link->network = network_ref(network);
 
         if (network->n_dns > 0 ||
             !strv_isempty(network->ntp) ||
@@ -818,6 +827,7 @@ int config_parse_ipv4ll(
                 void *userdata) {
 
         AddressFamilyBoolean *link_local = data;
+        int r;
 
         assert(filename);
         assert(lvalue);
@@ -828,7 +838,20 @@ int config_parse_ipv4ll(
          * config_parse_address_family_boolean(), except that it
          * applies only to IPv4 */
 
-        SET_FLAG(*link_local, ADDRESS_FAMILY_IPV4, parse_boolean(rvalue));
+        r = parse_boolean(rvalue);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r,
+                           "Failed to parse %s=%s, ignoring assignment. "
+                           "Note that the setting %s= is deprecated, please use LinkLocalAddressing= instead.",
+                           lvalue, rvalue, lvalue);
+                return 0;
+        }
+
+        SET_FLAG(*link_local, ADDRESS_FAMILY_IPV4, r);
+
+        log_syntax(unit, LOG_WARNING, filename, line, 0,
+                   "%s=%s is deprecated, please use LinkLocalAddressing=%s instead.",
+                   lvalue, rvalue, address_family_boolean_to_string(*link_local));
 
         return 0;
 }
@@ -1097,7 +1120,8 @@ int config_parse_dhcp_server_dns(
 
         for (;;) {
                 _cleanup_free_ char *w = NULL;
-                struct in_addr a, *m;
+                union in_addr_union a;
+                struct in_addr *m;
 
                 r = extract_first_word(&p, &w, NULL, 0);
                 if (r == -ENOMEM)
@@ -1110,9 +1134,10 @@ int config_parse_dhcp_server_dns(
                 if (r == 0)
                         break;
 
-                if (inet_pton(AF_INET, w, &a) <= 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, 0,
-                                   "Failed to parse DNS server address, ignoring: %s", w);
+                r = in_addr_from_string(AF_INET, w, &a);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r,
+                                   "Failed to parse DNS server address '%s', ignoring assignment: %m", w);
                         continue;
                 }
 
@@ -1120,7 +1145,7 @@ int config_parse_dhcp_server_dns(
                 if (!m)
                         return log_oom();
 
-                m[n->n_dhcp_server_dns++] = a;
+                m[n->n_dhcp_server_dns++] = a.in;
                 n->dhcp_server_dns = m;
         }
 
@@ -1257,7 +1282,8 @@ int config_parse_dhcp_server_ntp(
 
         for (;;) {
                 _cleanup_free_ char *w = NULL;
-                struct in_addr a, *m;
+                union in_addr_union a;
+                struct in_addr *m;
 
                 r = extract_first_word(&p, &w, NULL, 0);
                 if (r == -ENOMEM)
@@ -1270,9 +1296,10 @@ int config_parse_dhcp_server_ntp(
                 if (r == 0)
                         return 0;
 
-                if (inet_pton(AF_INET, w, &a) <= 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, 0,
-                                   "Failed to parse NTP server address, ignoring: %s", w);
+                r = in_addr_from_string(AF_INET, w, &a);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r,
+                                   "Failed to parse NTP server address '%s', ignoring: %m", w);
                         continue;
                 }
 
@@ -1280,7 +1307,7 @@ int config_parse_dhcp_server_ntp(
                 if (!m)
                         return log_oom();
 
-                m[n->n_dhcp_server_ntp++] = a;
+                m[n->n_dhcp_server_ntp++] = a.in;
                 n->dhcp_server_ntp = m;
         }
 }
@@ -1554,6 +1581,119 @@ int config_parse_section_route_table(
         return 0;
 }
 
+int config_parse_dhcp_max_attempts(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Network *network = data;
+        uint64_t a;
+        int r;
+
+        assert(network);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                network->dhcp_max_attempts = 0;
+                return 0;
+        }
+
+        if (streq(rvalue, "infinity")) {
+                network->dhcp_max_attempts = (uint64_t) -1;
+                return 0;
+        }
+
+        r = safe_atou64(rvalue, &a);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r,
+                           "Failed to parse DHCP maximum attempts, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        if (a == 0) {
+                log_syntax(unit, LOG_ERR, filename, line, 0,
+                           "%s= must be positive integer or 'infinity', ignoring: %s", lvalue, rvalue);
+                return 0;
+        }
+
+        network->dhcp_max_attempts = a;
+
+        return 0;
+}
+
+int config_parse_dhcp_black_listed_ip_address(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Network *network = data;
+        const char *p;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                network->dhcp_black_listed_ip = set_free(network->dhcp_black_listed_ip);
+                return 0;
+        }
+
+        for (p = rvalue;;) {
+                _cleanup_free_ char *n = NULL;
+                union in_addr_union ip;
+
+                r = extract_first_word(&p, &n, NULL, 0);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r,
+                                   "Failed to parse DHCP black listed ip address, ignoring assignment: %s",
+                                   rvalue);
+                        return 0;
+                }
+                if (r == 0)
+                        return 0;
+
+                r = in_addr_from_string(AF_INET, n, &ip);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r,
+                                   "DHCP black listed ip address is invalid, ignoring assignment: %s", n);
+                        continue;
+                }
+
+                r = set_ensure_allocated(&network->dhcp_black_listed_ip, NULL);
+                if (r < 0)
+                        return log_oom();
+
+                r = set_put(network->dhcp_black_listed_ip, UINT32_TO_PTR(ip.in.s_addr));
+                if (r == -EEXIST) {
+                        log_syntax(unit, LOG_WARNING, filename, line, r,
+                                   "DHCP black listed ip address is duplicated, ignoring assignment: %s", n);
+                        continue;
+                }
+                if (r < 0)
+                        log_syntax(unit, LOG_ERR, filename, line, r,
+                                   "Failed to store DHCP black listed ip address '%s', ignoring assignment: %m", n);
+        }
+
+        return 0;
+}
+
 DEFINE_CONFIG_PARSE_ENUM(config_parse_dhcp_use_domains, dhcp_use_domains, DHCPUseDomains,
                          "Failed to parse DHCP use domains setting");
 
@@ -1564,16 +1704,6 @@ static const char* const dhcp_use_domains_table[_DHCP_USE_DOMAINS_MAX] = {
 };
 
 DEFINE_STRING_TABLE_LOOKUP_WITH_BOOLEAN(dhcp_use_domains, DHCPUseDomains, DHCP_USE_DOMAINS_YES);
-
-DEFINE_CONFIG_PARSE_ENUM(config_parse_lldp_mode, lldp_mode, LLDPMode, "Failed to parse LLDP= setting.");
-
-static const char* const lldp_mode_table[_LLDP_MODE_MAX] = {
-        [LLDP_MODE_NO] = "no",
-        [LLDP_MODE_YES] = "yes",
-        [LLDP_MODE_ROUTERS_ONLY] = "routers-only",
-};
-
-DEFINE_STRING_TABLE_LOOKUP_WITH_BOOLEAN(lldp_mode, LLDPMode, LLDP_MODE_YES);
 
 int config_parse_iaid(const char *unit,
                       const char *filename,
