@@ -6,13 +6,14 @@
 
 #include "condition.h"
 #include "conf-parser.h"
-#include "dhcp-identifier.h"
 #include "hashmap.h"
 #include "netdev/bridge.h"
 #include "netdev/netdev.h"
 #include "networkd-address-label.h"
 #include "networkd-address.h"
 #include "networkd-brvlan.h"
+#include "networkd-dhcp-common.h"
+#include "networkd-dhcp4.h"
 #include "networkd-fdb.h"
 #include "networkd-ipv6-proxy-ndp.h"
 #include "networkd-lldp-rx.h"
@@ -25,24 +26,6 @@
 #include "ordered-set.h"
 #include "resolve-util.h"
 
-#define DHCP_ROUTE_METRIC 1024
-#define IPV4LL_ROUTE_METRIC 2048
-
-#define BRIDGE_VLAN_BITMAP_MAX 4096
-#define BRIDGE_VLAN_BITMAP_LEN (BRIDGE_VLAN_BITMAP_MAX / 32)
-
-typedef enum DHCPClientIdentifier {
-        DHCP_CLIENT_ID_MAC,
-        DHCP_CLIENT_ID_DUID,
-        /* The following option may not be good for RFC regarding DHCP (3315 and 4361).
-         * But some setups require this. E.g., Sky Broadband, the second largest provider in the UK
-         * requires the client id to be set to a custom string, reported at
-         * https://github.com/systemd/systemd/issues/7828 */
-        DHCP_CLIENT_ID_DUID_ONLY,
-        _DHCP_CLIENT_ID_MAX,
-        _DHCP_CLIENT_ID_INVALID = -1,
-} DHCPClientIdentifier;
-
 typedef enum IPv6PrivacyExtensions {
         /* The values map to the kernel's /proc/sys/net/ipv6/conf/xxx/use_tempaddr values */
         IPV6_PRIVACY_EXTENSIONS_NO,
@@ -52,31 +35,16 @@ typedef enum IPv6PrivacyExtensions {
         _IPV6_PRIVACY_EXTENSIONS_INVALID = -1,
 } IPv6PrivacyExtensions;
 
-typedef enum DHCPUseDomains {
-        DHCP_USE_DOMAINS_NO,
-        DHCP_USE_DOMAINS_YES,
-        DHCP_USE_DOMAINS_ROUTE,
-        _DHCP_USE_DOMAINS_MAX,
-        _DHCP_USE_DOMAINS_INVALID = -1,
-} DHCPUseDomains;
-
-typedef struct DUID {
-        /* Value of Type in [DHCP] section */
-        DUIDType type;
-
-        uint8_t raw_data_len;
-        uint8_t raw_data[MAX_DUID_LEN];
-        usec_t llt_time;
-} DUID;
-
-typedef enum RADVPrefixDelegation {
-        RADV_PREFIX_DELEGATION_NONE,
-        RADV_PREFIX_DELEGATION_STATIC,
-        RADV_PREFIX_DELEGATION_DHCP6,
-        RADV_PREFIX_DELEGATION_BOTH,
-        _RADV_PREFIX_DELEGATION_MAX,
-        _RADV_PREFIX_DELEGATION_INVALID = -1,
-} RADVPrefixDelegation;
+typedef enum KeepConfiguration {
+        KEEP_CONFIGURATION_NO            = 0,
+        KEEP_CONFIGURATION_DHCP_ON_START = 1 << 0,
+        KEEP_CONFIGURATION_DHCP_ON_STOP  = 1 << 1,
+        KEEP_CONFIGURATION_DHCP          = KEEP_CONFIGURATION_DHCP_ON_START | KEEP_CONFIGURATION_DHCP_ON_STOP,
+        KEEP_CONFIGURATION_STATIC        = 1 << 2,
+        KEEP_CONFIGURATION_YES           = KEEP_CONFIGURATION_DHCP | KEEP_CONFIGURATION_STATIC,
+        _KEEP_CONFIGURATION_MAX,
+        _KEEP_CONFIGURATION_INVALID = -1,
+} KeepConfiguration;
 
 typedef struct Manager Manager;
 
@@ -93,6 +61,7 @@ struct Network {
         char **match_driver;
         char **match_type;
         char **match_name;
+        char **match_property;
         LIST_HEAD(Condition, conditions);
 
         char *description;
@@ -100,6 +69,7 @@ struct Network {
         NetDev *bridge;
         NetDev *bond;
         NetDev *vrf;
+        NetDev *xfrm;
         Hashmap *stacked_netdevs;
         char *bridge_name;
         char *bond_name;
@@ -107,7 +77,7 @@ struct Network {
         Hashmap *stacked_netdev_names;
 
         /* DHCP Client Support */
-        AddressFamilyBoolean dhcp;
+        AddressFamily dhcp;
         DHCPClientIdentifier dhcp_client_identifier;
         char *dhcp_vendor_class_identifier;
         char **dhcp_user_class;
@@ -119,8 +89,9 @@ struct Network {
         bool dhcp_anonymize;
         bool dhcp_send_hostname;
         bool dhcp_broadcast;
-        bool dhcp_critical;
+        int dhcp_critical;
         bool dhcp_use_dns;
+        bool dhcp_routes_to_dns;
         bool dhcp_use_ntp;
         bool dhcp_use_mtu;
         bool dhcp_use_routes;
@@ -131,6 +102,10 @@ struct Network {
         bool dhcp_send_release;
         DHCPUseDomains dhcp_use_domains;
         Set *dhcp_black_listed_ip;
+
+        /* DHCPv6 Client support*/
+        bool dhcp6_use_dns;
+        bool dhcp6_use_ntp;
 
         /* DHCP Server Support */
         bool dhcp_server;
@@ -148,8 +123,10 @@ struct Network {
         uint32_t dhcp_server_pool_size;
 
         /* IPV4LL Support */
-        AddressFamilyBoolean link_local;
+        AddressFamily link_local;
         bool ipv4ll_route;
+
+        bool default_route_on_device;
 
         /* IPv6 prefix delegation support */
         RADVPrefixDelegation router_prefix_delegation;
@@ -194,7 +171,7 @@ struct Network {
         usec_t can_restart_us;
         int can_triple_sampling;
 
-        AddressFamilyBoolean ip_forward;
+        AddressFamily ip_forward;
         bool ip_masquerade;
 
         int ipv6_accept_ra;
@@ -212,19 +189,20 @@ struct Network {
         DHCPUseDomains ipv6_accept_ra_use_domains;
         uint32_t ipv6_accept_ra_route_table;
         bool ipv6_accept_ra_route_table_set;
+        Set *ndisc_black_listed_prefix;
 
         union in_addr_union ipv6_token;
         IPv6PrivacyExtensions ipv6_privacy_extensions;
 
         struct ether_addr *mac;
         uint32_t mtu;
-        bool mtu_is_set; /* Indicate MTUBytes= is specified. */
         int arp;
         int multicast;
         int allmulticast;
         bool unmanaged;
         bool configure_without_carrier;
         bool ignore_carrier_loss;
+        KeepConfiguration keep_configuration;
         uint32_t iaid;
         DUID duid;
 
@@ -294,43 +272,22 @@ void network_apply_anonymize_if_set(Network *network);
 bool network_has_static_ipv6_addresses(Network *network);
 
 CONFIG_PARSER_PROTOTYPE(config_parse_stacked_netdev);
-CONFIG_PARSER_PROTOTYPE(config_parse_domains);
 CONFIG_PARSER_PROTOTYPE(config_parse_tunnel);
-CONFIG_PARSER_PROTOTYPE(config_parse_dhcp);
-CONFIG_PARSER_PROTOTYPE(config_parse_dns);
-CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_client_identifier);
 CONFIG_PARSER_PROTOTYPE(config_parse_ipv6token);
 CONFIG_PARSER_PROTOTYPE(config_parse_ipv6_privacy_extensions);
+CONFIG_PARSER_PROTOTYPE(config_parse_domains);
+CONFIG_PARSER_PROTOTYPE(config_parse_dns);
 CONFIG_PARSER_PROTOTYPE(config_parse_hostname);
 CONFIG_PARSER_PROTOTYPE(config_parse_timezone);
-CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_server_dns);
-CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_black_listed_ip_address);
-CONFIG_PARSER_PROTOTYPE(config_parse_radv_dns);
-CONFIG_PARSER_PROTOTYPE(config_parse_radv_search_domains);
-CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_server_ntp);
 CONFIG_PARSER_PROTOTYPE(config_parse_dnssec_negative_trust_anchors);
-CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_use_domains);
-CONFIG_PARSER_PROTOTYPE(config_parse_section_route_table);
-CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_user_class);
 CONFIG_PARSER_PROTOTYPE(config_parse_ntp);
-CONFIG_PARSER_PROTOTYPE(config_parse_iaid);
 CONFIG_PARSER_PROTOTYPE(config_parse_required_for_online);
-CONFIG_PARSER_PROTOTYPE(config_parse_dhcp_max_attempts);
-/* Legacy IPv4LL support */
-CONFIG_PARSER_PROTOTYPE(config_parse_ipv4ll);
+CONFIG_PARSER_PROTOTYPE(config_parse_keep_configuration);
 
 const struct ConfigPerfItem* network_network_gperf_lookup(const char *key, GPERF_LEN_TYPE length);
-
-extern const sd_bus_vtable network_vtable[];
-
-int network_node_enumerator(sd_bus *bus, const char *path, void *userdata, char ***nodes, sd_bus_error *error);
-int network_object_find(sd_bus *bus, const char *path, const char *interface, void *userdata, void **found, sd_bus_error *error);
 
 const char* ipv6_privacy_extensions_to_string(IPv6PrivacyExtensions i) _const_;
 IPv6PrivacyExtensions ipv6_privacy_extensions_from_string(const char *s) _pure_;
 
-const char* dhcp_use_domains_to_string(DHCPUseDomains p) _const_;
-DHCPUseDomains dhcp_use_domains_from_string(const char *s) _pure_;
-
-const char* radv_prefix_delegation_to_string(RADVPrefixDelegation i) _const_;
-RADVPrefixDelegation radv_prefix_delegation_from_string(const char *s) _pure_;
+const char* keep_configuration_to_string(KeepConfiguration i) _const_;
+KeepConfiguration keep_configuration_from_string(const char *s) _pure_;

@@ -890,7 +890,6 @@ int bus_message_new_synthetic_error(
         return 0;
 }
 
-
 _public_ sd_bus_message* sd_bus_message_ref(sd_bus_message *m) {
         if (!m)
                 return NULL;
@@ -5265,7 +5264,7 @@ int bus_message_parse_fields(sd_bus_message *m) {
                         if (!b)
                                 return -EBADMSG;
 
-                        sig = strndup(b+1, item_size - (b+1-(char*) q));
+                        sig = memdup_suffix0(b+1, item_size - (b+1-(char*) q));
                         if (!sig)
                                 return -ENOMEM;
 

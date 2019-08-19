@@ -137,6 +137,10 @@ tests += [
          [],
          'ENABLE_EFI'],
 
+        [['src/test/test-unit-file.c'],
+         [],
+         []],
+
         [['src/test/test-unit-name.c',
           'src/test/test-helper.c'],
          [libcore,
@@ -148,7 +152,7 @@ tests += [
           libmount,
           libblkid]],
 
-        [['src/test/test-unit-file.c',
+        [['src/test/test-load-fragment.c',
           'src/test/test-helper.c'],
          [libcore,
           libshared],
@@ -213,6 +217,10 @@ tests += [
          []],
 
         [['src/test/test-format-table.c'],
+         [],
+         []],
+
+        [['src/test/test-format-util.c'],
          [],
          []],
 
@@ -298,6 +306,10 @@ tests += [
          []],
 
         [['src/test/test-escape.c'],
+         [],
+         []],
+
+        [['src/test/test-exit-status.c'],
          [],
          []],
 
@@ -603,6 +615,10 @@ tests += [
          [],
          []],
 
+        [['src/test/test-env-file.c'],
+         [],
+         []],
+
         [['src/test/test-env-util.c'],
          [],
          []],
@@ -618,6 +634,11 @@ tests += [
         [['src/test/test-path-util.c'],
          [],
          []],
+
+        [['src/test/test-chase-symlinks.c'],
+         [],
+         [],
+         '', 'manual'],
 
         [['src/test/test-path.c',
           'src/test/test-helper.c'],
@@ -744,6 +765,10 @@ tests += [
          []],
 
         [['src/test/test-sd-hwdb.c'],
+         [],
+         []],
+
+        [['src/test/test-local-addresses.c'],
          [],
          []],
 ]
@@ -953,10 +978,6 @@ tests += [
          []],
 
         [['src/libsystemd/sd-netlink/test-netlink.c'],
-         [],
-         []],
-
-        [['src/libsystemd/sd-netlink/test-local-addresses.c'],
          [],
          []],
 

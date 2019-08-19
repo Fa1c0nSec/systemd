@@ -6,6 +6,7 @@
 #include "alloc-util.h"
 #include "macro.h"
 #include "memory-util.h"
+#include "random-util.h"
 #include "tests.h"
 
 static void test_alloca(void) {
@@ -55,20 +56,20 @@ static void test_GREEDY_REALLOC(void) {
 }
 
 static void test_memdup_multiply_and_greedy_realloc(void) {
-        int org[] = {1, 2, 3};
+        static const int org[] = { 1, 2, 3 };
         _cleanup_free_ int *dup;
         int *p;
         size_t i, allocated = 3;
 
-        dup = (int*) memdup_suffix0_multiply(org, sizeof(int), 3);
+        dup = memdup_suffix0_multiply(org, sizeof(int), 3);
         assert_se(dup);
         assert_se(dup[0] == 1);
         assert_se(dup[1] == 2);
         assert_se(dup[2] == 3);
-        assert_se(*(uint8_t*) (dup + 3) == (uint8_t) 0);
+        assert_se(((uint8_t*) dup)[sizeof(int) * 3] == 0);
         free(dup);
 
-        dup = (int*) memdup_multiply(org, sizeof(int), 3);
+        dup = memdup_multiply(org, sizeof(int), 3);
         assert_se(dup);
         assert_se(dup[0] == 1);
         assert_se(dup[1] == 2);
@@ -132,6 +133,20 @@ static void test_cleanup_order(void) {
         log_debug("z: %p", &z);
 }
 
+static void test_auto_erase_memory(void) {
+        _cleanup_(erase_and_freep) uint8_t *p1, *p2;
+
+        assert_se(p1 = new(uint8_t, 1024));
+        assert_se(p2 = new(uint8_t, 1024));
+
+        assert_se(genuine_random_bytes(p1, 1024, RANDOM_BLOCK) == 0);
+
+        /* before we exit the scope, do something with this data, so that the compiler won't optimize this away */
+        memcpy(p2, p1, 1024);
+        for (size_t i = 0; i < 1024; i++)
+                assert_se(p1[i] == p2[i]);
+}
+
 int main(int argc, char *argv[]) {
         test_setup_logging(LOG_DEBUG);
 
@@ -140,6 +155,7 @@ int main(int argc, char *argv[]) {
         test_memdup_multiply_and_greedy_realloc();
         test_bool_assign();
         test_cleanup_order();
+        test_auto_erase_memory();
 
         return 0;
 }

@@ -35,6 +35,7 @@
 #include "device-private.h"
 #include "fd-util.h"
 #include "fileio.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "fsprg.h"
 #include "glob-util.h"
@@ -752,7 +753,7 @@ static int parse_argv(int argc, char *argv[]) {
                         r = free_and_strdup(&arg_verify_key, optarg);
                         if (r < 0)
                                 return r;
-                        /* Use memset not string_erase so this doesn't look confusing
+                        /* Use memset not explicit_bzero() or similar so this doesn't look confusing
                          * in ps or htop output. */
                         memset(optarg, 'x', strlen(optarg));
 
@@ -1100,19 +1101,19 @@ static int add_matches(sd_journal *j, char **args) {
                                         if (!comm)
                                                 return log_oom();
 
-                                        t = strappend("_COMM=", comm);
+                                        t = strjoin("_COMM=", comm);
                                         if (!t)
                                                 return log_oom();
 
                                         /* Append _EXE only if the interpreter is not a link.
                                            Otherwise, it might be outdated often. */
                                         if (lstat(interpreter, &st) == 0 && !S_ISLNK(st.st_mode)) {
-                                                t2 = strappend("_EXE=", interpreter);
+                                                t2 = strjoin("_EXE=", interpreter);
                                                 if (!t2)
                                                         return log_oom();
                                         }
                                 } else {
-                                        t = strappend("_EXE=", p);
+                                        t = strjoin("_EXE=", p);
                                         if (!t)
                                                 return log_oom();
                                 }
@@ -1424,7 +1425,7 @@ static int add_boot(sd_journal *j) {
         r = get_boots(j, NULL, &boot_id, arg_boot_offset);
         assert(r <= 1);
         if (r <= 0) {
-                const char *reason = (r == 0) ? "No such boot ID in journal" : strerror(-r);
+                const char *reason = (r == 0) ? "No such boot ID in journal" : strerror_safe(r);
 
                 if (sd_id128_is_null(arg_boot_id))
                         log_error("Data from the specified boot (%+i) is not available: %s",
@@ -1678,9 +1679,11 @@ static int add_syslog_identifier(sd_journal *j) {
         assert(j);
 
         STRV_FOREACH(i, arg_syslog_identifier) {
-                char *u;
+                _cleanup_free_ char *u = NULL;
 
-                u = strjoina("SYSLOG_IDENTIFIER=", *i);
+                u = strjoin("SYSLOG_IDENTIFIER=", *i);
+                if (!u)
+                        return -ENOMEM;
                 r = sd_journal_add_match(j, u, 0);
                 if (r < 0)
                         return r;
@@ -1952,10 +1955,14 @@ static int simple_varlink_call(const char *option, const char *method) {
                 return log_error_errno(r, "Failed to connect to /run/systemd/journal/io.systemd.journal: %m");
 
         (void) varlink_set_description(link, "journal");
+        (void) varlink_set_relative_timeout(link, USEC_INFINITY);
 
         r = varlink_call(link, method, NULL, NULL, &error, NULL);
         if (r < 0)
-                return log_error_errno(r, "Failed to execute varlink call: %s", error);
+                return log_error_errno(r, "Failed to execute varlink call: %m");
+        if (error)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOANO),
+                                       "Failed to execute varlink call: %s", error);
 
         return 0;
 }
@@ -1965,7 +1972,7 @@ static int flush_to_var(void) {
 }
 
 static int relinquish_var(void) {
-        return simple_varlink_call("--relinquish-var", "io.systemd.Journal.RelinquishVar");
+        return simple_varlink_call("--relinquish-var/--smart-relinquish-var", "io.systemd.Journal.RelinquishVar");
 }
 
 static int rotate(void) {
@@ -2678,8 +2685,16 @@ finish:
         free(arg_verify_key);
 
 #if HAVE_PCRE2
-        if (arg_compiled_pattern)
+        if (arg_compiled_pattern) {
                 pcre2_code_free(arg_compiled_pattern);
+
+                /* --grep was used, no error was thrown, but the pattern didn't
+                 * match anything. Let's mimic grep's behavior here and return
+                 * a non-zero exit code, so journalctl --grep can be used
+                 * in scripts and such */
+                if (r == 0 && n_shown == 0)
+                        r = -ENOENT;
+        }
 #endif
 
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;

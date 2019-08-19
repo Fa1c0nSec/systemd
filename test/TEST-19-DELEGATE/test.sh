@@ -4,13 +4,11 @@ TEST_DESCRIPTION="test cgroup delegation in the unified hierarchy"
 TEST_NO_NSPAWN=1
 
 . $TEST_BASE_DIR/test-functions
-QEMU_TIMEOUT=180
+QEMU_TIMEOUT=600
 UNIFIED_CGROUP_HIERARCHY=yes
 
 test_setup() {
-    create_empty_image
-    mkdir -p $TESTDIR/root
-    mount ${LOOPDEV}p1 $TESTDIR/root
+    create_empty_image_rootdir
 
     (
         LOG_LEVEL=5
@@ -40,10 +38,7 @@ EOF
         cp testsuite.sh $initdir/
 
         setup_testsuite
-    ) || return 1
-
-    ddebug "umount $TESTDIR/root"
-    umount $TESTDIR/root
+    )
 }
 
 do_test "$@"

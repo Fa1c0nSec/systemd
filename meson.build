@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1+
 
 project('systemd', 'c',
-        version : '242',
+        version : '243',
         license : 'LGPLv2+',
         default_options: [
                 'c_std=gnu99',
@@ -12,8 +12,8 @@ project('systemd', 'c',
         meson_version : '>= 0.46',
        )
 
-libsystemd_version = '0.26.0'
-libudev_version = '1.6.14'
+libsystemd_version = '0.27.0'
+libudev_version = '1.6.15'
 
 # We need the same data in two different formats, ugh!
 # Also, for hysterical reasons, we use different variable
@@ -29,6 +29,10 @@ substs.set('PROJECT_VERSION',      meson.project_version())
 # This is to be used instead of meson.source_root(), as the latter will return
 # the wrong result when systemd is being built as a meson subproject
 project_source_root = meson.current_source_dir()
+relative_source_path = run_command('realpath',
+                                   '--relative-to=@0@'.format(meson.current_build_dir()),
+                                   project_source_root).stdout().strip()
+conf.set_quoted('RELATIVE_SOURCE_PATH', relative_source_path)
 
 want_ossfuzz = get_option('oss-fuzz')
 want_libfuzzer = get_option('llvm-fuzz')
@@ -113,7 +117,6 @@ pkgconfiglibdir = get_option('pkgconfiglibdir') == '' ? join_paths(libdir, 'pkgc
 polkitpolicydir = join_paths(datadir, 'polkit-1/actions')
 polkitrulesdir = join_paths(datadir, 'polkit-1/rules.d')
 polkitpkladir = join_paths(localstatedir, 'lib/polkit-1/localauthority/10-vendor.d')
-varlogdir = join_paths(localstatedir, 'log')
 xinitrcdir = join_paths(sysconfdir, 'X11/xinit/xinitrc.d')
 rpmmacrosdir = get_option('rpmmacrosdir')
 if rpmmacrosdir != 'no'
@@ -154,6 +157,7 @@ systemdstatedir = join_paths(localstatedir, 'lib/systemd')
 catalogstatedir = join_paths(systemdstatedir, 'catalog')
 randomseeddir = join_paths(localstatedir, 'lib/systemd')
 profiledir = join_paths(rootlibexecdir, 'portable', 'profile')
+ntpservicelistdir = join_paths(rootprefixdir, 'lib/systemd/ntp-units.d')
 
 docdir = get_option('docdir')
 if docdir == ''
@@ -186,6 +190,7 @@ if pamconfdir == ''
 endif
 
 memory_accounting_default = get_option('memory-accounting-default')
+status_unit_format_default = get_option('status-unit-format-default')
 
 conf.set_quoted('PKGSYSCONFDIR',                              pkgsysconfdir)
 conf.set_quoted('SYSTEM_CONFIG_UNIT_PATH',                    join_paths(pkgsysconfdir, 'system'))
@@ -193,7 +198,6 @@ conf.set_quoted('SYSTEM_DATA_UNIT_PATH',                      systemunitdir)
 conf.set_quoted('SYSTEM_SYSVINIT_PATH',                       sysvinit_path)
 conf.set_quoted('SYSTEM_SYSVRCND_PATH',                       sysvrcnd_path)
 conf.set_quoted('RC_LOCAL_SCRIPT_PATH_START',                 get_option('rc-local'))
-conf.set_quoted('RC_LOCAL_SCRIPT_PATH_STOP',                  get_option('halt-local'))
 
 conf.set('ANSI_OK_COLOR',                                     'ANSI_' + get_option('ok-color').underscorify().to_upper())
 
@@ -240,6 +244,7 @@ conf.set_quoted('USER_KEYRING_PATH',                          join_paths(pkgsysc
 conf.set_quoted('DOCUMENT_ROOT',                              join_paths(pkgdatadir, 'gatewayd'))
 conf.set10('MEMORY_ACCOUNTING_DEFAULT',                       memory_accounting_default)
 conf.set_quoted('MEMORY_ACCOUNTING_DEFAULT_YES_NO',           memory_accounting_default ? 'yes' : 'no')
+conf.set('STATUS_UNIT_FORMAT_DEFAULT',                        'STATUS_UNIT_FORMAT_' + status_unit_format_default.to_upper())
 
 substs.set('prefix',                                          prefixdir)
 substs.set('rootprefix',                                      rootprefixdir)
@@ -273,16 +278,16 @@ substs.set('systemenvgeneratordir',                           systemenvgenerator
 substs.set('userenvgeneratordir',                             userenvgeneratordir)
 substs.set('systemshutdowndir',                               systemshutdowndir)
 substs.set('systemsleepdir',                                  systemsleepdir)
-substs.set('VARLOGDIR',                                       varlogdir)
 substs.set('CERTIFICATEROOT',                                 get_option('certificate-root'))
 substs.set('SYSTEMCTL',                                       join_paths(rootbindir, 'systemctl'))
 substs.set('RANDOM_SEED',                                     join_paths(randomseeddir, 'random-seed'))
 substs.set('SYSTEM_SYSVINIT_PATH',                            sysvinit_path)
 substs.set('SYSTEM_SYSVRCND_PATH',                            sysvrcnd_path)
 substs.set('RC_LOCAL_SCRIPT_PATH_START',                      get_option('rc-local'))
-substs.set('RC_LOCAL_SCRIPT_PATH_STOP',                       get_option('halt-local'))
 substs.set('MEMORY_ACCOUNTING_DEFAULT',                       memory_accounting_default ? 'yes' : 'no')
+substs.set('STATUS_UNIT_FORMAT_DEFAULT',                      status_unit_format_default)
 substs.set('HIGH_RLIMIT_NOFILE',                              conf.get('HIGH_RLIMIT_NOFILE'))
+substs.set('BUILD_ROOT',                                      meson.current_build_dir())
 
 #####################################################################
 
@@ -303,7 +308,14 @@ else
 endif
 
 if want_libfuzzer
-        fuzzing_engine = meson.get_compiler('cpp').find_library('Fuzzer')
+        fuzzing_engine = meson.get_compiler('cpp').find_library('Fuzzer', required : false)
+        if fuzzing_engine.found()
+                add_project_arguments('-fsanitize-coverage=trace-pc-guard,trace-cmp', language : 'c')
+        elif cc.has_argument('-fsanitize=fuzzer-no-link')
+                add_project_arguments('-fsanitize=fuzzer-no-link', language : 'c')
+        else
+                error('Looks like neither libFuzzer nor -fsanitize=fuzzer-no-link is supported')
+        endif
 elif want_ossfuzz
         fuzzing_engine = meson.get_compiler('cpp').find_library('FuzzingEngine')
 elif want_fuzzbuzz
@@ -490,6 +502,10 @@ foreach ident : [
                                  #include <unistd.h>'''],
         ['explicit_bzero' ,   '''#include <string.h>'''],
         ['reallocarray',      '''#include <malloc.h>'''],
+        ['set_mempolicy',     '''#include <stdlib.h>
+                                 #include <unistd.h>'''],
+        ['get_mempolicy',     '''#include <stdlib.h>
+                                 #include <unistd.h>'''],
 ]
 
         have = cc.has_function(ident[0], prefix : ident[1], args : '-D_GNU_SOURCE')
@@ -543,6 +559,7 @@ progs = [['quotaon',    '/usr/sbin/quotaon'    ],
          ['umount',     '/usr/bin/umount',     'UMOUNT_PATH'],
          ['loadkeys',   '/usr/bin/loadkeys',   'KBD_LOADKEYS'],
          ['setfont',    '/usr/bin/setfont',    'KBD_SETFONT'],
+         ['nologin',    '/usr/sbin/nologin',   ],
         ]
 foreach prog : progs
         path = get_option(prog[0] + '-path')
@@ -779,11 +796,11 @@ conf.set_quoted('GETTEXT_PACKAGE', meson.project_name())
 
 substs.set('SUSHELL', get_option('debug-shell'))
 substs.set('DEBUGTTY', get_option('debug-tty'))
+conf.set_quoted('DEBUGTTY', get_option('debug-tty'))
 
 enable_debug_hashmap = false
 enable_debug_mmap_cache = false
 enable_debug_siphash = false
-enable_debug_udev = false
 foreach name : get_option('debug-extra')
         if name == 'hashmap'
                 enable_debug_hashmap = true
@@ -791,8 +808,6 @@ foreach name : get_option('debug-extra')
                 enable_debug_mmap_cache = true
         elif name == 'siphash'
                 enable_debug_siphash = true
-        elif name == 'udev'
-                enable_debug_udev = true
         else
                 message('unknown debug option "@0@", ignoring'.format(name))
         endif
@@ -800,7 +815,6 @@ endforeach
 conf.set10('ENABLE_DEBUG_HASHMAP', enable_debug_hashmap)
 conf.set10('ENABLE_DEBUG_MMAP_CACHE', enable_debug_mmap_cache)
 conf.set10('ENABLE_DEBUG_SIPHASH', enable_debug_siphash)
-conf.set10('ENABLE_DEBUG_UDEV', enable_debug_udev)
 
 conf.set10('VALGRIND', get_option('valgrind'))
 conf.set10('LOG_TRACE', get_option('log-trace'))
@@ -979,24 +993,24 @@ if want_libidn == 'true' and want_libidn2 == 'true'
         error('libidn and libidn2 cannot be requested simultaneously')
 endif
 
-if want_libidn != 'false' and want_libidn2 != 'true' and not skip_deps
-        libidn = dependency('libidn',
-                            required : want_libidn == 'true')
-        have = libidn.found()
-else
-        have = false
-        libidn = []
-endif
-conf.set10('HAVE_LIBIDN', have)
-if not have and want_libidn2 != 'false' and not skip_deps
-        # libidn is used for both libidn and libidn2 objects
+if want_libidn2 != 'false' and want_libidn != 'true' and not skip_deps
         libidn = dependency('libidn2',
                             required : want_libidn2 == 'true')
         have = libidn.found()
 else
         have = false
+        libidn = []
 endif
 conf.set10('HAVE_LIBIDN2', have)
+if not have and want_libidn != 'false' and not skip_deps
+        # libidn is used for both libidn and libidn2 objects
+        libidn = dependency('libidn',
+                            required : want_libidn == 'true')
+        have = libidn.found()
+else
+        have = false
+endif
+conf.set10('HAVE_LIBIDN', have)
 
 want_libiptc = get_option('libiptc')
 if want_libiptc != 'false' and not skip_deps
@@ -1197,7 +1211,7 @@ if dns_over_tls != 'false'
                 have_openssl = conf.get('HAVE_OPENSSL') == 1
                 if dns_over_tls != 'auto' and not have_openssl
                         str = dns_over_tls == 'openssl' ? ' with openssl' : ''
-                        error('DNS-over-TLS support was requested$0$, but dependencies are not available'.format(str))
+                        error('DNS-over-TLS support was requested@0@, but dependencies are not available'.format(str))
                 endif
         endif
         have = have_gnutls or have_openssl
@@ -1215,7 +1229,7 @@ if skip_deps
         default_dns_over_tls = 'no'
 endif
 if default_dns_over_tls != 'no' and conf.get('ENABLE_DNS_OVER_TLS') == 0
-        message('default-dns-over-tls cannot be set to opportunistic when DNS-over-TLS support is disabled. Setting default-dns-over-tls to no.')
+        message('default-dns-over-tls cannot be enabled or set to opportunistic when DNS-over-TLS support is disabled. Setting default-dns-over-tls to no.')
         default_dns_over_tls = 'no'
 endif
 conf.set('DEFAULT_DNS_OVER_TLS_MODE',
@@ -1258,6 +1272,7 @@ foreach term : ['utmp',
                 'environment-d',
                 'binfmt',
                 'coredump',
+                'pstore',
                 'resolve',
                 'logind',
                 'hostnamed',
@@ -1363,6 +1378,7 @@ config_h = configure_file(
 meson_apply_m4 = find_program('tools/meson-apply-m4.sh')
 
 includes = include_directories('src/basic',
+                               'src/boot',
                                'src/shared',
                                'src/systemd',
                                'src/journal',
@@ -1469,6 +1485,7 @@ subdir('src/network')
 subdir('src/analyze')
 subdir('src/journal-remote')
 subdir('src/coredump')
+subdir('src/pstore')
 subdir('src/hostname')
 subdir('src/import')
 subdir('src/kernel-install')
@@ -1523,6 +1540,7 @@ foreach tuple : [['myhostname', 'ENABLE_NSS_MYHOSTNAME'],
                                      '-shared',
                                      '-Wl,--version-script=' + version_script_arg],
                         link_with : [libsystemd_static,
+                                     libshared_static,
                                      libbasic],
                         dependencies : [threads,
                                         librt],
@@ -2240,6 +2258,21 @@ if conf.get('ENABLE_COREDUMP') == 1
         public_programs += exe
 endif
 
+if conf.get('ENABLE_PSTORE') == 1
+        executable('systemd-pstore',
+                   systemd_pstore_sources,
+                   include_directories : includes,
+                   link_with : [libshared],
+                   dependencies : [threads,
+                                   libacl,
+                                   libdw,
+                                   libxz,
+                                   liblz4],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootlibexecdir)
+endif
+
 if conf.get('ENABLE_BINFMT') == 1
         exe = executable('systemd-binfmt',
                          'src/binfmt/binfmt.c',
@@ -2697,6 +2730,14 @@ if conf.get('ENABLE_NETWORKD') == 1
                    install : true,
                    install_dir : rootbindir)
         public_programs += exe
+
+        executable('systemd-network-generator',
+                   network_generator_sources,
+                   include_directories : includes,
+                   link_with : [libshared],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootlibexecdir)
 endif
 
 executable('systemd-sulogin-shell',
@@ -2825,9 +2866,16 @@ foreach tuple : fuzzers
         dependencies = tuple[2]
         defs = tuple.length() >= 4 ? tuple[3] : []
         incs = tuple.length() >= 5 ? tuple[4] : includes
+        link_args = []
 
-        if fuzzer_build
+        if want_ossfuzz or want_fuzzbuzz
                 dependencies += fuzzing_engine
+        elif want_libfuzzer
+                if fuzzing_engine.found()
+                        dependencies += fuzzing_engine
+                else
+                        link_args += ['-fsanitize=fuzzer']
+                endif
         else
                 sources += 'src/fuzz/fuzz-main.c'
         endif
@@ -2845,6 +2893,7 @@ foreach tuple : fuzzers
                 link_with : link_with,
                 dependencies : dependencies,
                 c_args : defs,
+                link_args: link_args,
                 install : false)
 endforeach
 endif
@@ -2909,6 +2958,16 @@ foreach exec : public_programs
                      args : exec.full_path())
         endif
 endforeach
+
+############################################################
+
+check_directives_sh = find_program('tools/check-directives.sh')
+
+if want_tests != 'false'
+        test('check-directives',
+             check_directives_sh,
+             args : project_source_root)
+endif
 
 ############################################################
 
@@ -3032,7 +3091,6 @@ status = [
         'bash completions directory:        @0@'.format(bashcompletiondir),
         'zsh completions directory:         @0@'.format(zshcompletiondir),
         'extra start script:                @0@'.format(get_option('rc-local')),
-        'extra stop script:                 @0@'.format(get_option('halt-local')),
         'debug shell:                       @0@ @ @1@'.format(get_option('debug-shell'),
                                                               get_option('debug-tty')),
         'TTY GID:                           @0@'.format(tty_gid),
@@ -3143,6 +3201,7 @@ foreach tuple : [
         ['DNS-over-TLS(gnutls)',  conf.get('DNS_OVER_TLS_USE_GNUTLS') == 1],
         ['DNS-over-TLS(openssl)', conf.get('DNS_OVER_TLS_USE_OPENSSL') == 1],
         ['coredump'],
+        ['pstore'],
         ['polkit'],
         ['legacy pkla',      install_polkit_pkla],
         ['efi'],
@@ -3172,7 +3231,6 @@ foreach tuple : [
         ['debug hashmap'],
         ['debug mmap cache'],
         ['debug siphash'],
-        ['debug udev'],
         ['valgrind',         conf.get('VALGRIND') == 1],
         ['trace logging',    conf.get('LOG_TRACE') == 1],
         ['link-udev-shared',      get_option('link-udev-shared')],

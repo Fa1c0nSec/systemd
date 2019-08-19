@@ -45,6 +45,7 @@ AgeingTimeSec=
 Priority=
 GroupForwardMask=
 VLANFiltering=
+MulticastIGMPVersion=
 [VRF]
 TableId=
 Table=
@@ -66,6 +67,7 @@ AllowLocalRemote=
 Local=
 TOS=
 Independent=
+AssignToLoopback=
 Key=
 InputKey=
 Encapsulation=
@@ -140,7 +142,10 @@ DynamicTransmitLoadBalancing=
 [FooOverUDP]
 Protocol=
 Port=
+PeerPort=
 Encapsulation=
+Local=
+Peer=
 [Tap]
 MultiQueue=
 OneQueue=
@@ -151,10 +156,14 @@ VNetHeader=
 [IPVLAN]
 Mode=
 Flags=
+[IPVTAP]
+Mode=
+Flags=
 [Tun]
 OneQueue=
 MultiQueue=
 PacketInfo=
+VNetHeader=
 Group=
 User=
 [NetDev]
@@ -200,3 +209,6 @@ KeyId=
 Key=
 KeyFile=
 Activate=
+[Xfrm]
+Independent=
+InterfaceId=

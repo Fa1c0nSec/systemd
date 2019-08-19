@@ -400,6 +400,9 @@ static int append_vendor_model(
                 const struct scsi_id_device *dev_scsi,
                 char buf[static VENDOR_LENGTH + MODEL_LENGTH]) {
 
+        assert(dev_scsi);
+        assert(buf);
+
         if (strnlen(dev_scsi->vendor, VENDOR_LENGTH) != VENDOR_LENGTH)
                 return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "%s: bad vendor string \"%s\"",
@@ -612,7 +615,7 @@ static int do_scsi_page83_inquiry(struct scsi_id_device *dev_scsi, int fd,
                  * Examine each descriptor returned. There is normally only
                  * one or a small number of descriptors.
                  */
-                for (j = 4; j <= (unsigned)page_83[3] + 3; j += page_83[j + 3] + 4) {
+                for (j = 4; j <= ((unsigned)page_83[2] << 8) + (unsigned)page_83[3] + 3; j += page_83[j + 3] + 4) {
                         retval = check_fill_0x83_id(dev_scsi, page_83 + j,
                                                     id_search_list + id_ind,
                                                     serial, serial_short, len,

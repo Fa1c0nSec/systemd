@@ -1002,7 +1002,6 @@ int varlink_wait(Varlink *v, usec_t timeout) {
         usec_t t;
 
         assert_return(v, -EINVAL);
-        assert_return(!v->server, -ENOTTY);
 
         if (v->state == VARLINK_DISCONNECTED)
                 return -ENOTCONN;
@@ -1211,6 +1210,7 @@ static int varlink_enqueue_json(Varlink *v, JsonVariant *m) {
         r = json_variant_format(m, 0, &text);
         if (r < 0)
                 return r;
+        assert(text[r] == '\0');
 
         if (v->output_buffer_size + r + 1 > VARLINK_BUFFER_MAX)
                 return -ENOBUFS;
@@ -1234,15 +1234,16 @@ static int varlink_enqueue_json(Varlink *v, JsonVariant *m) {
 
         } else {
                 char *n;
+                const size_t new_size = v->output_buffer_size + r + 1;
 
-                n = new(char, v->output_buffer_size + r + 1);
+                n = new(char, new_size);
                 if (!n)
                         return -ENOMEM;
 
                 memcpy(mempcpy(n, v->output_buffer + v->output_buffer_index, v->output_buffer_size), text, r + 1);
 
                 free_and_replace(v->output_buffer, n);
-                v->output_buffer_size += r + 1;
+                v->output_buffer_allocated = v->output_buffer_size = new_size;
                 v->output_buffer_index = 0;
         }
 
@@ -1873,7 +1874,6 @@ fail:
         return r;
 }
 
-
 void varlink_detach_event(Varlink *v) {
         if (!v)
                 return;
@@ -2051,12 +2051,14 @@ int varlink_server_add_connection(VarlinkServer *server, int fd, Varlink **ret) 
 
         varlink_set_state(v, VARLINK_IDLE_SERVER);
 
-        r = varlink_attach_event(v, server->event, server->event_priority);
-        if (r < 0) {
-                varlink_log_errno(v, r, "Failed to attach new connection: %m");
-                v->fd = -1; /* take the fd out of the connection again */
-                varlink_close(v);
-                return r;
+        if (server->event) {
+                r = varlink_attach_event(v, server->event, server->event_priority);
+                if (r < 0) {
+                        varlink_log_errno(v, r, "Failed to attach new connection: %m");
+                        v->fd = -1; /* take the fd out of the connection again */
+                        varlink_close(v);
+                        return r;
+                }
         }
 
         if (ret)
@@ -2302,7 +2304,7 @@ int varlink_server_bind_method(VarlinkServer *s, const char *method, VarlinkMeth
 
 int varlink_server_bind_method_many_internal(VarlinkServer *s, ...) {
         va_list ap;
-        int r;
+        int r = 0;
 
         assert_return(s, -EINVAL);
 
@@ -2319,10 +2321,11 @@ int varlink_server_bind_method_many_internal(VarlinkServer *s, ...) {
 
                 r = varlink_server_bind_method(s, method, callback);
                 if (r < 0)
-                        return r;
+                        break;
         }
+        va_end(ap);
 
-        return 0;
+        return r;
 }
 
 int varlink_server_bind_connect(VarlinkServer *s, VarlinkConnect callback) {

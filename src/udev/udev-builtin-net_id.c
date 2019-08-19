@@ -139,7 +139,7 @@ static int get_virtfn_info(sd_device *dev, struct netnames *names, struct virtfn
                 if (!startswith(dent->d_name, "virtfn"))
                         continue;
 
-                virtfn_link_file = strjoin(physfn_pci_syspath, "/", dent->d_name);
+                virtfn_link_file = path_join(physfn_pci_syspath, dent->d_name);
                 if (!virtfn_link_file)
                         return -ENOMEM;
 
@@ -927,7 +927,7 @@ static int builtin_net_id(sd_device *dev, int argc, char *argv[], bool test) {
         return 0;
 }
 
-const struct udev_builtin udev_builtin_net_id = {
+const UdevBuiltin udev_builtin_net_id = {
         .name = "net_id",
         .cmd = builtin_net_id,
         .help = "Network device properties",

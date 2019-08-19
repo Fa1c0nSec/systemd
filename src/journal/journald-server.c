@@ -255,7 +255,7 @@ static int open_journal(
                 JournalMetrics *metrics,
                 JournalFile **ret) {
 
-        JournalFile *f;
+        _cleanup_(journal_file_closep) JournalFile *f = NULL;
         int r;
 
         assert(s);
@@ -273,12 +273,10 @@ static int open_journal(
                 return r;
 
         r = journal_file_enable_post_change_timer(f, s->event, POST_CHANGE_TIMER_INTERVAL_USEC);
-        if (r < 0) {
-                (void) journal_file_close(f);
+        if (r < 0)
                 return r;
-        }
 
-        *ret = f;
+        *ret = TAKE_PTR(f);
         return r;
 }
 
@@ -739,7 +737,7 @@ static void server_cache_hostname(Server *s) {
         if (!t)
                 return;
 
-        x = strappend("_HOSTNAME=", t);
+        x = strjoin("_HOSTNAME=", t);
         if (!x)
                 return;
 
@@ -786,6 +784,10 @@ static bool shall_try_append_again(JournalFile *f, int r) {
         case -ETXTBSY:         /* Journal file is from the future */
                 log_warning("%s: Journal file is from the future, rotating.", f->path);
                 return true;
+
+        case -EAFNOSUPPORT:
+                log_warning("%s: underlying file system does not support memory mapping or another required file system feature.", f->path);
+                return false;
 
         default:
                 return false;
@@ -1059,7 +1061,7 @@ void server_driver_message(Server *s, pid_t object_pid, const char *message_id, 
                 /* We failed to format the message. Emit a warning instead. */
                 char buf[LINE_MAX];
 
-                xsprintf(buf, "MESSAGE=Entry printing failed: %s", strerror(-r));
+                xsprintf(buf, "MESSAGE=Entry printing failed: %s", strerror_safe(r));
 
                 n = 3;
                 iovec[n++] = IOVEC_MAKE_STRING("PRIORITY=4");
@@ -2190,8 +2192,8 @@ int server_init(Server *s) {
         server_cache_boot_id(s);
         server_cache_machine_id(s);
 
-        s->runtime_storage.path = strjoin("/run/log/journal/", SERVER_MACHINE_ID(s));
-        s->system_storage.path  = strjoin("/var/log/journal/", SERVER_MACHINE_ID(s));
+        s->runtime_storage.path = path_join("/run/log/journal", SERVER_MACHINE_ID(s));
+        s->system_storage.path  = path_join("/var/log/journal", SERVER_MACHINE_ID(s));
         if (!s->runtime_storage.path || !s->system_storage.path)
                 return -ENOMEM;
 
@@ -2228,11 +2230,8 @@ void server_done(Server *s) {
 
         client_context_flush_all(s);
 
-        if (s->system_journal)
-                (void) journal_file_close(s->system_journal);
-
-        if (s->runtime_journal)
-                (void) journal_file_close(s->runtime_journal);
+        (void) journal_file_close(s->system_journal);
+        (void) journal_file_close(s->runtime_journal);
 
         ordered_hashmap_free_with_destructor(s->user_journals, journal_file_close);
 
