@@ -1,15 +1,11 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <alloca.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <grp.h>
-#include <pwd.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utmp.h>
@@ -20,7 +16,6 @@
 #include "fileio.h"
 #include "format-util.h"
 #include "macro.h"
-#include "missing.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "random-util.h"
@@ -89,7 +84,7 @@ char *getusername_malloc(void) {
         return uid_to_name(getuid());
 }
 
-static bool is_nologin_shell(const char *shell) {
+bool is_nologin_shell(const char *shell) {
 
         return PATH_IN_SET(shell,
                            /* 'nologin' is the friendliest way to disable logins for a user account. It prints a nice
@@ -409,10 +404,16 @@ char* gid_to_name(gid_t gid) {
         return ret;
 }
 
+static bool gid_list_has(const gid_t *list, size_t size, gid_t val) {
+        for (size_t i = 0; i < size; i++)
+                if (list[i] == val)
+                        return true;
+        return false;
+}
+
 int in_gid(gid_t gid) {
-        long ngroups_max;
-        gid_t *gids;
-        int r, i;
+        _cleanup_free_ gid_t *gids = NULL;
+        int ngroups;
 
         if (getgid() == gid)
                 return 1;
@@ -423,20 +424,11 @@ int in_gid(gid_t gid) {
         if (!gid_is_valid(gid))
                 return -EINVAL;
 
-        ngroups_max = sysconf(_SC_NGROUPS_MAX);
-        assert(ngroups_max > 0);
+        ngroups = getgroups_alloc(&gids);
+        if (ngroups < 0)
+                return ngroups;
 
-        gids = newa(gid_t, ngroups_max);
-
-        r = getgroups(ngroups_max, gids);
-        if (r < 0)
-                return -errno;
-
-        for (i = 0; i < r; i++)
-                if (gids[i] == gid)
-                        return 1;
-
-        return 0;
+        return gid_list_has(gids, ngroups, gid);
 }
 
 int in_group(const char *name) {
@@ -448,6 +440,71 @@ int in_group(const char *name) {
                 return r;
 
         return in_gid(gid);
+}
+
+int merge_gid_lists(const gid_t *list1, size_t size1, const gid_t *list2, size_t size2, gid_t **ret) {
+        size_t nresult = 0;
+        assert(ret);
+
+        if (size2 > INT_MAX - size1)
+                return -ENOBUFS;
+
+        gid_t *buf = new(gid_t, size1 + size2);
+        if (!buf)
+                return -ENOMEM;
+
+        /* Duplicates need to be skipped on merging, otherwise they'll be passed on and stored in the kernel. */
+        for (size_t i = 0; i < size1; i++)
+                if (!gid_list_has(buf, nresult, list1[i]))
+                        buf[nresult++] = list1[i];
+        for (size_t i = 0; i < size2; i++)
+                if (!gid_list_has(buf, nresult, list2[i]))
+                        buf[nresult++] = list2[i];
+        *ret = buf;
+        return (int)nresult;
+}
+
+int getgroups_alloc(gid_t** gids) {
+        gid_t *allocated;
+        _cleanup_free_  gid_t *p = NULL;
+        int ngroups = 8;
+        unsigned attempt = 0;
+
+        allocated = new(gid_t, ngroups);
+        if (!allocated)
+                return -ENOMEM;
+        p = allocated;
+
+        for (;;) {
+                ngroups = getgroups(ngroups, p);
+                if (ngroups >= 0)
+                        break;
+                if (errno != EINVAL)
+                        return -errno;
+
+                /* Give up eventually */
+                if (attempt++ > 10)
+                        return -EINVAL;
+
+                /* Get actual size needed, and size the array explicitly. Note that this is potentially racy
+                 * to use (in multi-threaded programs), hence let's call this in a loop. */
+                ngroups = getgroups(0, NULL);
+                if (ngroups < 0)
+                        return -errno;
+                if (ngroups == 0)
+                        return false;
+
+                free(allocated);
+
+                allocated = new(gid_t, ngroups);
+                if (!allocated)
+                        return -ENOMEM;
+
+                p = allocated;
+        }
+
+        *gids = TAKE_PTR(p);
+        return ngroups;
 }
 
 int get_home_dir(char **_h) {
@@ -620,16 +677,19 @@ int take_etc_passwd_lock(const char *root) {
         return fd;
 }
 
-bool valid_user_group_name(const char *u) {
+bool valid_user_group_name_full(const char *u, bool strict) {
         const char *i;
         long sz;
 
         /* Checks if the specified name is a valid user/group name. Also see POSIX IEEE Std 1003.1-2008, 2016 Edition,
          * 3.437. We are a bit stricter here however. Specifically we deviate from POSIX rules:
          *
-         * - We don't allow any dots (this would break chown syntax which permits dots as user/group name separator)
          * - We require that names fit into the appropriate utmp field
          * - We don't allow empty user names
+         * - No dots or digits in the first character
+         *
+         * If strict==true, additionally:
+         * - We don't allow any dots (this conflicts with chown syntax which permits dots as user/group name separator)
          *
          * Note that other systems are even more restrictive, and don't permit underscores or uppercase characters.
          */
@@ -642,12 +702,25 @@ bool valid_user_group_name(const char *u) {
             u[0] != '_')
                 return false;
 
+        bool warned = false;
+
         for (i = u+1; *i; i++) {
-                if (!(*i >= 'a' && *i <= 'z') &&
-                    !(*i >= 'A' && *i <= 'Z') &&
-                    !(*i >= '0' && *i <= '9') &&
-                    !IN_SET(*i, '_', '-'))
-                        return false;
+                if (((*i >= 'a' && *i <= 'z') ||
+                     (*i >= 'A' && *i <= 'Z') ||
+                     (*i >= '0' && *i <= '9') ||
+                     IN_SET(*i, '_', '-')))
+                        continue;
+
+                if (*i == '.' && !strict) {
+                        if (!warned) {
+                                log_warning("Bad user or group name \"%s\", accepting for compatibility.", u);
+                                warned = true;
+                        }
+
+                        continue;
+                }
+
+                return false;
         }
 
         sz = sysconf(_SC_LOGIN_NAME_MAX);
@@ -662,15 +735,15 @@ bool valid_user_group_name(const char *u) {
         return true;
 }
 
-bool valid_user_group_name_or_id(const char *u) {
+bool valid_user_group_name_or_id_full(const char *u, bool strict) {
 
-        /* Similar as above, but is also fine with numeric UID/GID specifications, as long as they are in the right
-         * range, and not the invalid user ids. */
+        /* Similar as above, but is also fine with numeric UID/GID specifications, as long as they are in the
+         * right range, and not the invalid user ids. */
 
         if (isempty(u))
                 return false;
 
-        if (valid_user_group_name(u))
+        if (valid_user_group_name_full(u, strict))
                 return true;
 
         return parse_uid(u, NULL) >= 0;
@@ -872,40 +945,3 @@ int fgetsgent_sane(FILE *stream, struct sgrp **sg) {
         return !!s;
 }
 #endif
-
-int make_salt(char **ret) {
-        static const char table[] =
-                "abcdefghijklmnopqrstuvwxyz"
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                "0123456789"
-                "./";
-
-        uint8_t raw[16];
-        char *salt, *j;
-        size_t i;
-        int r;
-
-        /* This is a bit like crypt_gensalt_ra(), but doesn't require libcrypt, and doesn't do anything but
-         * SHA512, i.e. is legacy-free and minimizes our deps. */
-
-        assert_cc(sizeof(table) == 64U + 1U);
-
-        /* Insist on the best randomness by setting RANDOM_BLOCK, this is about keeping passwords secret after all. */
-        r = genuine_random_bytes(raw, sizeof(raw), RANDOM_BLOCK);
-        if (r < 0)
-                return r;
-
-        salt = new(char, 3+sizeof(raw)+1+1);
-        if (!salt)
-                return -ENOMEM;
-
-        /* We only bother with SHA512 hashed passwords, the rest is legacy, and we don't do legacy. */
-        j = stpcpy(salt, "$6$");
-        for (i = 0; i < sizeof(raw); i++)
-                j[i] = table[raw[i] & 63];
-        j[i++] = '$';
-        j[i] = 0;
-
-        *ret = salt;
-        return 0;
-}

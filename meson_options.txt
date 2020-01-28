@@ -16,6 +16,8 @@ option('link-udev-shared', type : 'boolean',
        description : 'link systemd-udev and its helpers to libsystemd-shared.so')
 option('link-systemctl-shared', type: 'boolean',
        description : 'link systemctl against libsystemd-shared.so')
+option('link-networkd-shared', type: 'boolean',
+       description : 'link systemd-networkd and its helpers to libsystemd-shared.so')
 option('static-libsystemd', type : 'combo',
        choices : ['false', 'true', 'pic', 'no-pic'],
        description : '''install a static library for libsystemd''')
@@ -59,6 +61,8 @@ option('valgrind', type : 'boolean', value : false,
        description : 'do extra operations to avoid valgrind warnings')
 option('log-trace', type : 'boolean', value : false,
        description : 'enable low level debug logging')
+option('user-path', type : 'string',
+       description : '$PATH to use for user sessions')
 
 option('utmp', type : 'boolean',
        description : 'support for utmp/wtmp log handling')
@@ -76,6 +80,8 @@ option('environment-d', type : 'boolean',
        description : 'support for environment.d')
 option('binfmt', type : 'boolean',
        description : 'support for custom binary formats')
+option('repart', type : 'combo', choices : ['auto', 'true', 'false'],
+       description : 'install the systemd-repart tool')
 option('coredump', type : 'boolean',
        description : 'install the coredump handler')
 option('pstore', type : 'boolean',
@@ -90,6 +96,8 @@ option('machined', type : 'boolean',
        description : 'install the systemd-machined stack')
 option('portabled', type : 'boolean',
        description : 'install the systemd-portabled stack')
+option('userdb', type : 'boolean',
+       description : 'install the systemd-userdbd stack')
 option('networkd', type : 'boolean',
        description : 'install the systemd-networkd stack')
 option('timedated', type : 'boolean',
@@ -144,9 +152,9 @@ option('dbussessionservicedir', type : 'string',
 option('dbussystemservicedir', type : 'string',
        description : 'D-Bus system service directory')
 option('pkgconfigdatadir', type : 'string', value : '',
-       description : 'directory for ')
+       description : 'directory for arch-independent pkg-config files')
 option('pkgconfiglibdir', type : 'string', value : '',
-       description : 'directory for ')
+       description : 'directory for standard pkg-config files')
 option('rpmmacrosdir', type : 'string', value : 'lib/rpm/macros.d',
        description : 'directory for rpm macros ["no" disables]')
 option('pamlibdir', type : 'string',
@@ -207,6 +215,8 @@ option('gshadow', type : 'boolean',
        description : 'support for shadow group')
 option('default-locale', type : 'string', value : '',
        description : 'default locale used when /etc/locale.conf does not exist')
+option('service-watchdog', type : 'string', value : '3min',
+       description : 'default watchdog setting for systemd services')
 
 option('default-dnssec', type : 'combo',
        description : 'default DNSSEC mode',
@@ -252,6 +262,8 @@ option('audit', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'libaudit support')
 option('blkid', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'libblkid support')
+option('fdisk', type : 'combo', choices : ['auto', 'true', 'false'],
+       description : 'libfdisk support')
 option('kmod', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'support for loadable modules')
 option('pam', type : 'combo', choices : ['auto', 'true', 'false'],
@@ -278,6 +290,8 @@ option('gnutls', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'gnutls support')
 option('openssl', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'openssl support')
+option('p11kit', type : 'combo', choices : ['auto', 'true', 'false'],
+       description : 'p11kit support')
 option('elfutils', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'elfutils support')
 option('zlib', type : 'combo', choices : ['auto', 'true', 'false'],

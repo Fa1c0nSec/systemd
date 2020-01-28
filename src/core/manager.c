@@ -3,8 +3,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/kd.h>
-#include <signal.h>
-#include <string.h>
 #include <sys/epoll.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
@@ -31,10 +29,12 @@
 #include "bus-util.h"
 #include "clean-ipc.h"
 #include "clock-util.h"
+#include "core-varlink.h"
 #include "dbus-job.h"
 #include "dbus-manager.h"
 #include "dbus-unit.h"
 #include "dbus.h"
+#include "def.h"
 #include "dirent-util.h"
 #include "env-util.h"
 #include "escape.h"
@@ -45,20 +45,18 @@
 #include "fileio.h"
 #include "fs-util.h"
 #include "hashmap.h"
-#include "io-util.h"
 #include "install.h"
+#include "io-util.h"
 #include "label.h"
 #include "locale-setup.h"
 #include "log.h"
 #include "macro.h"
 #include "manager.h"
 #include "memory-util.h"
-#include "missing.h"
 #include "mkdir.h"
 #include "parse-util.h"
 #include "path-lookup.h"
 #include "path-util.h"
-#include "plymouth-util.h"
 #include "process-util.h"
 #include "ratelimit.h"
 #include "rlimit-util.h"
@@ -72,6 +70,7 @@
 #include "string-util.h"
 #include "strv.h"
 #include "strxcpyx.h"
+#include "sysctl-util.h"
 #include "syslog-util.h"
 #include "terminal-util.h"
 #include "time-util.h"
@@ -294,10 +293,12 @@ static int manager_check_ask_password(Manager *m) {
                 if (m->ask_password_inotify_fd < 0)
                         return log_error_errno(errno, "Failed to create inotify object: %m");
 
-                if (inotify_add_watch(m->ask_password_inotify_fd, "/run/systemd/ask-password", IN_CREATE|IN_DELETE|IN_MOVE) < 0) {
-                        log_error_errno(errno, "Failed to watch \"/run/systemd/ask-password\": %m");
+                r = inotify_add_watch_and_warn(m->ask_password_inotify_fd,
+                                               "/run/systemd/ask-password",
+                                               IN_CREATE|IN_DELETE|IN_MOVE);
+                if (r < 0) {
                         manager_close_ask_password(m);
-                        return -errno;
+                        return r;
                 }
 
                 r = sd_event_add_io(m->event, &m->ask_password_event_source,
@@ -603,6 +604,8 @@ static char** sanitize_environment(char **l) {
 }
 
 int manager_default_environment(Manager *m) {
+        int r;
+
         assert(m);
 
         m->transient_environment = strv_free(m->transient_environment);
@@ -616,16 +619,29 @@ int manager_default_environment(Manager *m) {
                  * /proc/self/environ valid; it is used for tagging
                  * the init process inside containers. */
                 m->transient_environment = strv_new("PATH=" DEFAULT_PATH);
+                if (!m->transient_environment)
+                        return log_oom();
 
                 /* Import locale variables LC_*= from configuration */
                 (void) locale_setup(&m->transient_environment);
-        } else
-                /* The user manager passes its own environment
-                 * along to its children. */
-                m->transient_environment = strv_copy(environ);
+        } else {
+                _cleanup_free_ char *k = NULL;
 
-        if (!m->transient_environment)
-                return log_oom();
+                /* The user manager passes its own environment
+                 * along to its children, except for $PATH. */
+                m->transient_environment = strv_copy(environ);
+                if (!m->transient_environment)
+                        return log_oom();
+
+                k = strdup("PATH=" DEFAULT_USER_PATH);
+                if (!k)
+                        return log_oom();
+
+                r = strv_env_replace(&m->transient_environment, k);
+                if (r < 0)
+                        return log_oom();
+                TAKE_PTR(k);
+        }
 
         sanitize_environment(m->transient_environment);
 
@@ -747,7 +763,7 @@ int manager_new(UnitFileScope scope, ManagerTestRunFlags test_run_flags, Manager
                 .default_timer_accuracy_usec = USEC_PER_MINUTE,
                 .default_memory_accounting = MEMORY_ACCOUNTING_DEFAULT,
                 .default_tasks_accounting = true,
-                .default_tasks_max = UINT64_MAX,
+                .default_tasks_max = TASKS_MAX_UNSET,
                 .default_timeout_start_usec = DEFAULT_TIMEOUT_USEC,
                 .default_timeout_stop_usec = DEFAULT_TIMEOUT_USEC,
                 .default_restart_usec = DEFAULT_RESTART_USEC,
@@ -800,7 +816,7 @@ int manager_new(UnitFileScope scope, ManagerTestRunFlags test_run_flags, Manager
         }
 
         /* Reboot immediately if the user hits C-A-D more often than 7x per 2s */
-        RATELIMIT_INIT(m->ctrl_alt_del_ratelimit, 2 * USEC_PER_SEC, 7);
+        m->ctrl_alt_del_ratelimit = (RateLimit) { .interval = 2 * USEC_PER_SEC, .burst = 7 };
 
         r = manager_default_environment(m);
         if (r < 0)
@@ -866,8 +882,17 @@ int manager_new(UnitFileScope scope, ManagerTestRunFlags test_run_flags, Manager
                         return r;
         }
 
-        if (MANAGER_IS_SYSTEM(m) && test_run_flags == 0) {
-                r = mkdir_label("/run/systemd/units", 0755);
+        if (test_run_flags == 0) {
+                if (MANAGER_IS_SYSTEM(m))
+                        r = mkdir_label("/run/systemd/units", 0755);
+                else {
+                        _cleanup_free_ char *units_path = NULL;
+                        r = xdg_user_runtime_dir(&units_path, "/systemd/units");
+                        if (r < 0)
+                                return r;
+                        r = mkdir_p_label(units_path, 0755);
+                }
+
                 if (r < 0 && r != -EEXIST)
                         return r;
         }
@@ -1322,6 +1347,7 @@ Manager* manager_free(Manager *m) {
         lookup_paths_flush_generator(&m->lookup_paths);
 
         bus_done(m);
+        manager_varlink_done(m);
 
         exec_runtime_vacuum(m);
         hashmap_free(m->exec_runtime_by_id);
@@ -1349,7 +1375,6 @@ Manager* manager_free(Manager *m) {
         sd_event_source_unref(m->jobs_in_progress_event_source);
         sd_event_source_unref(m->run_queue_event_source);
         sd_event_source_unref(m->user_lookup_event_source);
-        sd_event_source_unref(m->sync_bus_names_event_source);
 
         safe_close(m->signal_fd);
         safe_close(m->notify_fd);
@@ -1586,9 +1611,6 @@ static void manager_ready(Manager *m) {
         manager_recheck_journal(m);
         manager_recheck_dbus(m);
 
-        /* Sync current state of bus names with our set of listening units */
-        (void) manager_enqueue_sync_bus_names(m);
-
         /* Let's finally catch up with any changes that took place while we were reloading/reexecing */
         manager_catchup(m);
 
@@ -1629,9 +1651,7 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
 
         manager_preset_all(m);
 
-        r = lookup_paths_reduce(&m->lookup_paths);
-        if (r < 0)
-                log_warning_errno(r, "Failed to reduce unit file paths, ignoring: %m");
+        lookup_paths_log(&m->lookup_paths);
 
         {
                 /* This block is (optionally) done with the reloading counter bumped */
@@ -1685,6 +1705,10 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
                         log_warning_errno(r, "Failed to deserialized tracked clients, ignoring: %m");
                 m->deserialized_subscribed = strv_free(m->deserialized_subscribed);
 
+                r = manager_varlink_init(m);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to set up Varlink server, ignoring: %m");
+
                 /* Third, fire things up! */
                 manager_coldplug(m);
 
@@ -1725,6 +1749,9 @@ int manager_add_job(
         if (mode == JOB_ISOLATE && !unit->allow_isolate)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_ISOLATION, "Operation refused, unit may not be isolated.");
 
+        if (mode == JOB_TRIGGERING && type != JOB_STOP)
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "--job-mode=triggering is only valid for stop.");
+
         log_unit_debug(unit, "Trying to enqueue job %s/%s/%s", unit->id, job_type_to_string(type), job_mode_to_string(mode));
 
         type = job_type_collapse(type, unit);
@@ -1741,6 +1768,12 @@ int manager_add_job(
 
         if (mode == JOB_ISOLATE) {
                 r = transaction_add_isolate_jobs(tr, m);
+                if (r < 0)
+                        goto tr_abort;
+        }
+
+        if (mode == JOB_TRIGGERING) {
+                r = transaction_add_triggering_jobs(tr, unit);
                 if (r < 0)
                         goto tr_abort;
         }
@@ -2842,9 +2875,8 @@ static int manager_dispatch_jobs_in_progress(sd_event_source *source, usec_t use
 }
 
 int manager_loop(Manager *m) {
+        RateLimit rl = { .interval = 1*USEC_PER_SEC, .burst = 50000 };
         int r;
-
-        RATELIMIT_DEFINE(rl, 1*USEC_PER_SEC, 50000);
 
         assert(m);
         assert(m->objective == MANAGER_OK); /* Ensure manager_startup() has been called */
@@ -3520,9 +3552,7 @@ int manager_reload(Manager *m) {
         (void) manager_run_environment_generators(m);
         (void) manager_run_generators(m);
 
-        r = lookup_paths_reduce(&m->lookup_paths);
-        if (r < 0)
-                log_warning_errno(r, "Failed to reduce unit file paths, ignoring: %m");
+        lookup_paths_log(&m->lookup_paths);
 
         /* We flushed out generated files, for which we don't watch mtime, so we should flush the old map. */
         manager_free_unit_name_maps(m);
@@ -4014,6 +4044,19 @@ static bool manager_journal_is_running(Manager *m) {
         return true;
 }
 
+void disable_printk_ratelimit(void) {
+        /* Disable kernel's printk ratelimit.
+         *
+         * Logging to /dev/kmsg is most useful during early boot and shutdown, where normal logging
+         * mechanisms are not available. The semantics of this sysctl are such that any kernel command-line
+         * setting takes precedence. */
+        int r;
+
+        r = sysctl_write("kernel/printk_devkmsg", "on");
+        if (r < 0)
+                log_debug_errno(r, "Failed to set sysctl kernel.printk_devkmsg=on: %m");
+}
+
 void manager_recheck_journal(Manager *m) {
 
         assert(m);
@@ -4072,9 +4115,10 @@ static bool manager_get_show_status(Manager *m, StatusType type) {
 
 const char *manager_get_confirm_spawn(Manager *m) {
         static int last_errno = 0;
-        const char *vc = m->confirm_spawn;
         struct stat st;
         int r;
+
+        assert(m);
 
         /* Here's the deal: we want to test the validity of the console but don't want
          * PID1 to go through the whole console process which might block. But we also
@@ -4091,25 +4135,26 @@ const char *manager_get_confirm_spawn(Manager *m) {
          * reason the configured console is not ready, we fallback to the default
          * console. */
 
-        if (!vc || path_equal(vc, "/dev/console"))
-                return vc;
+        if (!m->confirm_spawn || path_equal(m->confirm_spawn, "/dev/console"))
+                return m->confirm_spawn;
 
-        r = stat(vc, &st);
-        if (r < 0)
+        if (stat(m->confirm_spawn, &st) < 0) {
+                r = -errno;
                 goto fail;
+        }
 
         if (!S_ISCHR(st.st_mode)) {
-                errno = ENOTTY;
+                r = -ENOTTY;
                 goto fail;
         }
 
         last_errno = 0;
-        return vc;
+        return m->confirm_spawn;
+
 fail:
-        if (last_errno != errno) {
-                last_errno = errno;
-                log_warning_errno(errno, "Failed to open %s: %m, using default console", vc);
-        }
+        if (last_errno != r)
+                last_errno = log_warning_errno(r, "Failed to open %s, using default console: %m", m->confirm_spawn);
+
         return "/dev/console";
 }
 
@@ -4435,7 +4480,7 @@ static void manager_deserialize_uid_refs_one_internal(
 
         r = parse_uid(value, &uid);
         if (r < 0 || uid == 0) {
-                log_debug("Unable to parse UID reference serialization");
+                log_debug("Unable to parse UID reference serialization: " UID_FMT, uid);
                 return;
         }
 

@@ -11,10 +11,8 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
-#include <sys/socket.h>
 #include <sys/sysmacros.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -578,22 +576,29 @@ int vt_disallocate(const char *name) {
 int make_console_stdio(void) {
         int fd, r;
 
-        /* Make /dev/console the controlling terminal and stdin/stdout/stderr */
+        /* Make /dev/console the controlling terminal and stdin/stdout/stderr, if we can. If we can't use
+         * /dev/null instead. This is particularly useful if /dev/console is turned off, e.g. if console=null
+         * is specified on the kernel command line. */
 
         fd = acquire_terminal("/dev/console", ACQUIRE_TERMINAL_FORCE|ACQUIRE_TERMINAL_PERMISSIVE, USEC_INFINITY);
-        if (fd < 0)
-                return log_error_errno(fd, "Failed to acquire terminal: %m");
+        if (fd < 0) {
+                log_warning_errno(fd, "Failed to acquire terminal, using /dev/null stdin/stdout/stderr instead: %m");
 
-        r = reset_terminal_fd(fd, true);
-        if (r < 0)
-                log_warning_errno(r, "Failed to reset terminal, ignoring: %m");
+                r = make_null_stdio();
+                if (r < 0)
+                        return log_error_errno(r, "Failed to make /dev/null stdin/stdout/stderr: %m");
 
-        r = rearrange_stdio(fd, fd, fd); /* This invalidates 'fd' both on success and on failure. */
-        if (r < 0)
-                return log_error_errno(r, "Failed to make terminal stdin/stdout/stderr: %m");
+        } else {
+                r = reset_terminal_fd(fd, true);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to reset terminal, ignoring: %m");
+
+                r = rearrange_stdio(fd, fd, fd); /* This invalidates 'fd' both on success and on failure. */
+                if (r < 0)
+                        return log_error_errno(r, "Failed to make terminal stdin/stdout/stderr: %m");
+        }
 
         reset_terminal_feature_caches();
-
         return 0;
 }
 
@@ -1201,6 +1206,11 @@ bool colors_enabled(void) {
                 val = getenv_bool("SYSTEMD_COLORS");
                 if (val >= 0)
                         cached_colors_enabled = val;
+
+                else if (getenv("NO_COLOR"))
+                        /* We only check for the presence of the variable; value is ignored. */
+                        cached_colors_enabled = false;
+
                 else if (getpid_cached() == 1)
                         /* PID1 outputs to the console without holding it open all the time */
                         cached_colors_enabled = !getenv_terminal_is_dumb();
@@ -1225,6 +1235,9 @@ bool dev_console_colors_enabled(void) {
         b = getenv_bool("SYSTEMD_COLORS");
         if (b >= 0)
                 return b;
+
+        if (getenv("NO_COLOR"))
+                return false;
 
         if (getenv_for_pid(1, "TERM", &s) <= 0)
                 (void) proc_cmdline_get_key("TERM", 0, &s);

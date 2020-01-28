@@ -20,6 +20,7 @@
 #include "parse-util.h"
 #include "siphash24.h"
 #include "socket-util.h"
+#include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
 #include "utf8.h"
@@ -102,6 +103,18 @@ static bool net_condition_test_strv(char * const *patterns, const char *string) 
         return has_positive_rule ? match : true;
 }
 
+static bool net_condition_test_ifname(char * const *patterns, const char *ifname, char * const *alternative_names) {
+        if (net_condition_test_strv(patterns, ifname))
+                return true;
+
+        char * const *p;
+        STRV_FOREACH(p, alternative_names)
+                if (net_condition_test_strv(patterns, *p))
+                        return true;
+
+        return false;
+}
+
 static int net_condition_test_property(char * const *match_property, sd_device *device) {
         char * const *p;
 
@@ -136,15 +149,41 @@ static int net_condition_test_property(char * const *match_property, sd_device *
         return true;
 }
 
+static const char *const wifi_iftype_table[NL80211_IFTYPE_MAX+1] = {
+        [NL80211_IFTYPE_ADHOC] = "ad-hoc",
+        [NL80211_IFTYPE_STATION] = "station",
+        [NL80211_IFTYPE_AP] = "ap",
+        [NL80211_IFTYPE_AP_VLAN] = "ap-vlan",
+        [NL80211_IFTYPE_WDS] = "wds",
+        [NL80211_IFTYPE_MONITOR] = "monitor",
+        [NL80211_IFTYPE_MESH_POINT] = "mesh-point",
+        [NL80211_IFTYPE_P2P_CLIENT] = "p2p-client",
+        [NL80211_IFTYPE_P2P_GO] = "p2p-go",
+        [NL80211_IFTYPE_P2P_DEVICE] = "p2p-device",
+        [NL80211_IFTYPE_OCB] = "ocb",
+        [NL80211_IFTYPE_NAN] = "nan",
+};
+
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(wifi_iftype, enum nl80211_iftype);
+
 bool net_match_config(Set *match_mac,
+                      Set *match_permanent_mac,
                       char * const *match_paths,
                       char * const *match_drivers,
                       char * const *match_types,
                       char * const *match_names,
                       char * const *match_property,
+                      char * const *match_wifi_iftype,
+                      char * const *match_ssid,
+                      Set *match_bssid,
                       sd_device *device,
                       const struct ether_addr *dev_mac,
-                      const char *dev_name) {
+                      const struct ether_addr *dev_permanent_mac,
+                      const char *dev_name,
+                      char * const *alternative_names,
+                      enum nl80211_iftype wifi_iftype,
+                      const char *ssid,
+                      const struct ether_addr *bssid) {
 
         const char *dev_path = NULL, *dev_driver = NULL, *dev_type = NULL, *mac_str;
 
@@ -163,6 +202,12 @@ bool net_match_config(Set *match_mac,
         if (match_mac && (!dev_mac || !set_contains(match_mac, dev_mac)))
                 return false;
 
+        if (match_permanent_mac &&
+            (!dev_permanent_mac ||
+             ether_addr_is_null(dev_permanent_mac) ||
+             !set_contains(match_permanent_mac, dev_permanent_mac)))
+                return false;
+
         if (!net_condition_test_strv(match_paths, dev_path))
                 return false;
 
@@ -172,10 +217,19 @@ bool net_match_config(Set *match_mac,
         if (!net_condition_test_strv(match_types, dev_type))
                 return false;
 
-        if (!net_condition_test_strv(match_names, dev_name))
+        if (!net_condition_test_ifname(match_names, dev_name, alternative_names))
                 return false;
 
         if (!net_condition_test_property(match_property, device))
+                return false;
+
+        if (!net_condition_test_strv(match_wifi_iftype, wifi_iftype_to_string(wifi_iftype)))
+                return false;
+
+        if (!net_condition_test_strv(match_ssid, ssid))
+                return false;
+
+        if (match_bssid && (!bssid || !set_contains(match_bssid, bssid)))
                 return false;
 
         return true;
@@ -316,7 +370,7 @@ int config_parse_match_ifnames(
                         return 0;
                 }
 
-                if (!ifname_valid(word)) {
+                if (!ifname_valid_full(word, ltype)) {
                         log_syntax(unit, LOG_ERR, filename, line, 0,
                                    "Interface name is not valid or too long, ignoring assignment: %s", word);
                         continue;

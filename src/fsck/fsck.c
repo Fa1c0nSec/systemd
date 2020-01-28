@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -156,8 +155,8 @@ static double percent(int pass, unsigned long cur, unsigned long max) {
                 (double) cur / (double) max;
 }
 
-static int process_progress(int fd) {
-        _cleanup_fclose_ FILE *console = NULL, *f = NULL;
+static int process_progress(int fd, FILE* console) {
+        _cleanup_fclose_ FILE *f = NULL;
         usec_t last = 0;
         bool locked = false;
         int clear = 0, r;
@@ -169,12 +168,8 @@ static int process_progress(int fd) {
         f = fdopen(fd, "r");
         if (!f) {
                 safe_close(fd);
-                return -errno;
+                return log_debug_errno(errno, "Failed to use pipe: %m");
         }
-
-        console = fopen("/dev/console", "we");
-        if (!console)
-                return -ENOMEM;
 
         for (;;) {
                 int pass, m;
@@ -189,10 +184,9 @@ static int process_progress(int fd) {
                                 r = log_warning_errno(errno, "Failed to read from progress pipe: %m");
                         else if (feof(f))
                                 r = 0;
-                        else {
-                                log_warning("Failed to parse progress pipe data");
-                                r = -EBADMSG;
-                        }
+                        else
+                                r = log_warning_errno(SYNTHETIC_ERRNO(errno), "Failed to parse progress pipe data");
+
                         break;
                 }
 
@@ -255,6 +249,7 @@ static int run(int argc, char *argv[]) {
         _cleanup_close_pair_ int progress_pipe[2] = { -1, -1 };
         _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
         _cleanup_free_ char *dpath = NULL;
+        _cleanup_fclose_ FILE *console = NULL;
         const char *device, *type;
         bool root_directory;
         struct stat st;
@@ -343,7 +338,9 @@ static int run(int argc, char *argv[]) {
                 }
         }
 
-        if (arg_show_progress &&
+        console = fopen("/dev/console", "we");
+        if (console &&
+            arg_show_progress &&
             pipe(progress_pipe) < 0)
                 return log_error_errno(errno, "pipe(): %m");
 
@@ -402,8 +399,10 @@ static int run(int argc, char *argv[]) {
                 _exit(FSCK_OPERATIONAL_ERROR);
         }
 
-        progress_pipe[1] = safe_close(progress_pipe[1]);
-        (void) process_progress(TAKE_FD(progress_pipe[0]));
+        if (console) {
+                progress_pipe[1] = safe_close(progress_pipe[1]);
+                (void) process_progress(TAKE_FD(progress_pipe[0]), console);
+        }
 
         exit_status = wait_for_terminate_and_check("fsck", pid, WAIT_LOG_ABNORMAL);
         if (exit_status < 0)

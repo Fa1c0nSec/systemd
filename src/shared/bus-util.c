@@ -3,9 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -27,7 +25,6 @@
 #include "def.h"
 #include "escape.h"
 #include "fd-util.h"
-#include "missing.h"
 #include "mountpoint-util.h"
 #include "nsflags.h"
 #include "parse-util.h"
@@ -414,7 +411,8 @@ int bus_verify_polkit_async(
                         e = sd_bus_message_get_error(q->reply);
 
                         /* Treat no PK available as access denied */
-                        if (sd_bus_error_has_name(e, SD_BUS_ERROR_SERVICE_UNKNOWN))
+                        if (sd_bus_error_has_name(e, SD_BUS_ERROR_SERVICE_UNKNOWN) ||
+                            sd_bus_error_has_name(e, SD_BUS_ERROR_NAME_HAS_NO_OWNER))
                                 return -EACCES;
 
                         /* Copy error from polkit reply */
@@ -425,7 +423,6 @@ int bus_verify_polkit_async(
                 r = sd_bus_message_enter_container(q->reply, 'r', "bba{ss}");
                 if (r >= 0)
                         r = sd_bus_message_read(q->reply, "bb", &authorized, &challenge);
-
                 if (r < 0)
                         return r;
 
@@ -1103,7 +1100,8 @@ static int map_basic(sd_bus *bus, const char *member, sd_bus_message *m, unsigne
 
         switch (type) {
 
-        case SD_BUS_TYPE_STRING: {
+        case SD_BUS_TYPE_STRING:
+        case SD_BUS_TYPE_OBJECT_PATH: {
                 const char **p = userdata;
                 const char *s;
 
@@ -1129,7 +1127,7 @@ static int map_basic(sd_bus *bus, const char *member, sd_bus_message *m, unsigne
                 if (r < 0)
                         return r;
 
-                return strv_free_and_replace(*p, l);
+                return strv_extend_strv(p, l, false);
         }
 
         case SD_BUS_TYPE_BOOLEAN: {
@@ -1681,7 +1679,8 @@ int bus_open_system_watch_bind_with_description(sd_bus **ret, const char *descri
 
         assert(ret);
 
-        /* Match like sd_bus_open_system(), but with the "watch_bind" feature and the Connected() signal turned on. */
+        /* Match like sd_bus_open_system(), but with the "watch_bind" feature and the Connected() signal
+         * turned on. */
 
         r = sd_bus_new(&bus);
         if (r < 0)
@@ -1702,10 +1701,6 @@ int bus_open_system_watch_bind_with_description(sd_bus **ret, const char *descri
                 return r;
 
         r = sd_bus_set_bus_client(bus, true);
-        if (r < 0)
-                return r;
-
-        r = sd_bus_set_trusted(bus, true);
         if (r < 0)
                 return r;
 
@@ -1737,8 +1732,8 @@ int bus_reply_pair_array(sd_bus_message *m, char **l) {
 
         assert(m);
 
-        /* Reply to the specified message with a message containing a dictionary put together from the specified
-         * strv */
+        /* Reply to the specified message with a message containing a dictionary put together from the
+         * specified strv */
 
         r = sd_bus_message_new_method_return(m, &reply);
         if (r < 0)

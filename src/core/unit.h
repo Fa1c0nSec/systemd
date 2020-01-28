@@ -18,6 +18,7 @@ typedef struct UnitRef UnitRef;
 typedef enum KillOperation {
         KILL_TERMINATE,
         KILL_TERMINATE_AND_LOG,
+        KILL_RESTART,
         KILL_KILL,
         KILL_WATCHDOG,
         _KILL_OPERATION_MAX,
@@ -227,7 +228,7 @@ typedef struct Unit {
         int load_error;
 
         /* Put a ratelimit on unit starting */
-        RateLimit start_limit;
+        RateLimit start_ratelimit;
         EmergencyAction start_limit_action;
 
         /* What to do on failure or success */
@@ -365,8 +366,8 @@ typedef struct Unit {
         bool exported_invocation_id:1;
         bool exported_log_level_max:1;
         bool exported_log_extra_fields:1;
-        bool exported_log_rate_limit_interval:1;
-        bool exported_log_rate_limit_burst:1;
+        bool exported_log_ratelimit_interval:1;
+        bool exported_log_ratelimit_burst:1;
 
         /* Whether we warned about clamping the CPU quota period */
         bool warned_clamping_cpu_quota_period:1;
@@ -529,7 +530,7 @@ typedef struct UnitVTable {
         void (*notify_message)(Unit *u, const struct ucred *ucred, char **tags, FDSet *fds);
 
         /* Called whenever a name this Unit registered for comes or goes away. */
-        void (*bus_name_owner_change)(Unit *u, const char *old_owner, const char *new_owner);
+        void (*bus_name_owner_change)(Unit *u, const char *new_owner);
 
         /* Called for each property that is being set */
         int (*bus_set_property)(Unit *u, const char *name, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
@@ -598,6 +599,15 @@ typedef struct UnitVTable {
 
         /* True if cgroup delegation is permissible */
         bool can_delegate:1;
+
+        /* True if the unit type triggers other units, i.e. can have a UNIT_TRIGGERS dependency */
+        bool can_trigger:1;
+
+        /* True if the unit type knows a failure state, and thus can be source of an OnFailure= dependency */
+        bool can_fail:1;
+
+        /* True if After= dependencies should be refused */
+        bool refuse_after:1;
 
         /* True if units of this type shall be startable only once and then never again */
         bool once_only:1;
@@ -669,8 +679,7 @@ int unit_merge_by_name(Unit *u, const char *other);
 
 Unit *unit_follow_merge(Unit *u) _pure_;
 
-int unit_load_fragment_and_dropin(Unit *u);
-int unit_load_fragment_and_dropin_optional(Unit *u);
+int unit_load_fragment_and_dropin(Unit *u, bool fragment_required);
 int unit_load(Unit *unit);
 
 int unit_set_slice(Unit *u, Unit *slice);
@@ -733,7 +742,7 @@ int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs);
 int unit_deserialize(Unit *u, FILE *f, FDSet *fds);
 int unit_deserialize_skip(FILE *f);
 
-int unit_add_node_dependency(Unit *u, const char *what, bool wants, UnitDependency d, UnitDependencyMask mask);
+int unit_add_node_dependency(Unit *u, const char *what, UnitDependency d, UnitDependencyMask mask);
 
 int unit_coldplug(Unit *u);
 void unit_catchup(Unit *u);
@@ -752,6 +761,7 @@ const char *unit_slice_name(Unit *u);
 bool unit_stop_pending(Unit *u) _pure_;
 bool unit_inactive_or_pending(Unit *u) _pure_;
 bool unit_active_or_pending(Unit *u);
+bool unit_will_restart_default(Unit *u);
 bool unit_will_restart(Unit *u);
 
 int unit_add_default_target_dependency(Unit *u, Unit *target);
@@ -805,12 +815,6 @@ int unit_fail_if_noncanonical(Unit *u, const char* where);
 
 int unit_test_start_limit(Unit *u);
 
-void unit_unref_uid(Unit *u, bool destroy_now);
-int unit_ref_uid(Unit *u, uid_t uid, bool clean_ipc);
-
-void unit_unref_gid(Unit *u, bool destroy_now);
-int unit_ref_gid(Unit *u, gid_t gid, bool clean_ipc);
-
 int unit_ref_uid_gid(Unit *u, uid_t uid, gid_t gid);
 void unit_unref_uid_gid(Unit *u, bool destroy_now);
 
@@ -824,6 +828,7 @@ bool unit_shall_confirm_spawn(Unit *u);
 int unit_set_exec_params(Unit *s, ExecParameters *p);
 
 int unit_fork_helper_process(Unit *u, const char *name, pid_t *ret);
+int unit_fork_and_watch_rm_rf(Unit *u, char **paths, pid_t *ret_pid);
 
 void unit_remove_dependencies(Unit *u, UnitDependencyMask mask);
 
@@ -840,6 +845,10 @@ const char *unit_label_path(Unit *u);
 
 int unit_pid_attachable(Unit *unit, pid_t pid, sd_bus_error *error);
 
+static inline bool unit_has_job_type(Unit *u, JobType type) {
+        return u && u->job && u->job->type == type;
+}
+
 /* unit_log_skip is for cases like ExecCondition= where a unit is considered "done"
  * after some execution, rather than succeeded or failed. */
 void unit_log_skip(Unit *u, const char *result);
@@ -852,7 +861,7 @@ static inline void unit_log_result(Unit *u, bool success, const char *result) {
                 unit_log_failure(u, result);
 }
 
-void unit_log_process_exit(Unit *u, int level, const char *kind, const char *command, int code, int status);
+void unit_log_process_exit(Unit *u, const char *kind, const char *command, bool success, int code, int status);
 
 int unit_exit_status(Unit *u);
 int unit_success_action_exit_status(Unit *u);
@@ -860,6 +869,7 @@ int unit_failure_action_exit_status(Unit *u);
 
 int unit_test_trigger_loaded(Unit *u);
 
+void unit_destroy_runtime_directory(Unit *u, const ExecContext *context);
 int unit_clean(Unit *u, ExecCleanMask mask);
 int unit_can_clean(Unit *u, ExecCleanMask *ret_mask);
 

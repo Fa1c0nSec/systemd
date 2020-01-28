@@ -2,19 +2,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <glob.h>
-#include <grp.h>
 #include <poll.h>
-#include <signal.h>
-#include <string.h>
-#include <sys/capability.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/personality.h>
 #include <sys/prctl.h>
 #include <sys/shm.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -48,6 +42,7 @@
 #include "cap-list.h"
 #include "capability-util.h"
 #include "chown-recursive.h"
+#include "cgroup-setup.h"
 #include "cpu-set-util.h"
 #include "def.h"
 #include "env-file.h"
@@ -66,7 +61,7 @@
 #include "macro.h"
 #include "manager.h"
 #include "memory-util.h"
-#include "missing.h"
+#include "missing_fs.h"
 #include "mkdir.h"
 #include "namespace.h"
 #include "parse-util.h"
@@ -1130,7 +1125,7 @@ static int setup_pam(
                 gid_t gid,
                 const char *tty,
                 char ***env,
-                int fds[], size_t n_fds) {
+                const int fds[], size_t n_fds) {
 
 #if HAVE_PAM
 
@@ -1197,6 +1192,10 @@ static int setup_pam(
         pam_code = pam_acct_mgmt(handle, flags);
         if (pam_code != PAM_SUCCESS)
                 goto fail;
+
+        pam_code = pam_setcred(handle, PAM_ESTABLISH_CRED | flags);
+        if (pam_code != PAM_SUCCESS)
+                log_debug("pam_setcred() failed, ignoring: %s", pam_strerror(handle, pam_code));
 
         pam_code = pam_open_session(handle, flags);
         if (pam_code != PAM_SUCCESS)
@@ -1281,6 +1280,10 @@ static int setup_pam(
                                 break;
                         }
                 }
+
+                pam_code = pam_setcred(handle, PAM_DELETE_CRED | flags);
+                if (pam_code != PAM_SUCCESS)
+                        goto child_finish;
 
                 /* If our parent died we'll end the session */
                 if (getppid() != parent_pid) {
@@ -1401,6 +1404,7 @@ static bool context_has_no_new_privileges(const ExecContext *c) {
                 exec_context_restrict_namespaces_set(c) ||
                 c->protect_kernel_tunables ||
                 c->protect_kernel_modules ||
+                c->protect_kernel_logs ||
                 c->private_devices ||
                 context_has_syscall_filters(c) ||
                 !set_isempty(c->syscall_archs) ||
@@ -1547,6 +1551,19 @@ static int apply_protect_kernel_modules(const Unit *u, const ExecContext *c) {
         return seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_MODULE, SCMP_ACT_ERRNO(EPERM), false);
 }
 
+static int apply_protect_kernel_logs(const Unit *u, const ExecContext *c) {
+        assert(u);
+        assert(c);
+
+        if (!c->protect_kernel_logs)
+                return 0;
+
+        if (skip_seccomp_unavailable(u, "ProtectKernelLogs="))
+                return 0;
+
+        return seccomp_protect_syslog();
+}
+
 static int apply_private_devices(const Unit *u, const ExecContext *c) {
         assert(u);
         assert(c);
@@ -1621,7 +1638,7 @@ static void do_idle_pipe_dance(int idle_pipe[static 4]) {
                         n = write(idle_pipe[3], "x", 1);
                         if (n > 0)
                                 /* Wait for systemd to react to the signal above. */
-                                fd_wait_for_event(idle_pipe[0], POLLHUP, IDLE_TIMEOUT2_USEC);
+                                (void) fd_wait_for_event(idle_pipe[0], POLLHUP, IDLE_TIMEOUT2_USEC);
                 }
 
                 idle_pipe[0] = safe_close(idle_pipe[0]);
@@ -1863,6 +1880,7 @@ static bool exec_needs_mount_namespace(
             context->protect_home != PROTECT_HOME_NO ||
             context->protect_kernel_tunables ||
             context->protect_kernel_modules ||
+            context->protect_kernel_logs ||
             context->protect_control_groups)
                 return true;
 
@@ -1890,7 +1908,7 @@ static bool exec_needs_mount_namespace(
         return false;
 }
 
-static int setup_private_users(uid_t uid, gid_t gid) {
+static int setup_private_users(uid_t ouid, gid_t ogid, uid_t uid, gid_t gid) {
         _cleanup_free_ char *uid_map = NULL, *gid_map = NULL;
         _cleanup_close_pair_ int errno_pipe[2] = { -1, -1 };
         _cleanup_close_ int unshare_ready_fd = -1;
@@ -1899,38 +1917,43 @@ static int setup_private_users(uid_t uid, gid_t gid) {
         ssize_t n;
         int r;
 
-        /* Set up a user namespace and map root to root, the selected UID/GID to itself, and everything else to
+        /* Set up a user namespace and map the original UID/GID (IDs from before any user or group changes, i.e.
+         * the IDs from the user or system manager(s)) to itself, the selected UID/GID to itself, and everything else to
          * nobody. In order to be able to write this mapping we need CAP_SETUID in the original user namespace, which
          * we however lack after opening the user namespace. To work around this we fork() a temporary child process,
          * which waits for the parent to create the new user namespace while staying in the original namespace. The
          * child then writes the UID mapping, under full privileges. The parent waits for the child to finish and
-         * continues execution normally. */
+         * continues execution normally.
+         * For unprivileged users (i.e. without capabilities), the root to root mapping is excluded. As such, it
+         * does not need CAP_SETUID to write the single line mapping to itself. */
 
-        if (uid != 0 && uid_is_valid(uid)) {
+        /* Can only set up multiple mappings with CAP_SETUID. */
+        if (have_effective_cap(CAP_SETUID) && uid != ouid && uid_is_valid(uid))
                 r = asprintf(&uid_map,
-                             "0 0 1\n"                      /* Map root → root */
+                             UID_FMT " " UID_FMT " 1\n"     /* Map $OUID → $OUID */
                              UID_FMT " " UID_FMT " 1\n",    /* Map $UID → $UID */
-                             uid, uid);
-                if (r < 0)
-                        return -ENOMEM;
-        } else {
-                uid_map = strdup("0 0 1\n");            /* The case where the above is the same */
-                if (!uid_map)
-                        return -ENOMEM;
-        }
+                             ouid, ouid, uid, uid);
+        else
+                r = asprintf(&uid_map,
+                             UID_FMT " " UID_FMT " 1\n",    /* Map $OUID → $OUID */
+                             ouid, ouid);
 
-        if (gid != 0 && gid_is_valid(gid)) {
+        if (r < 0)
+                return -ENOMEM;
+
+        /* Can only set up multiple mappings with CAP_SETGID. */
+        if (have_effective_cap(CAP_SETGID) && gid != ogid && gid_is_valid(gid))
                 r = asprintf(&gid_map,
-                             "0 0 1\n"                      /* Map root → root */
+                             GID_FMT " " GID_FMT " 1\n"     /* Map $OGID → $OGID */
                              GID_FMT " " GID_FMT " 1\n",    /* Map $GID → $GID */
-                             gid, gid);
-                if (r < 0)
-                        return -ENOMEM;
-        } else {
-                gid_map = strdup("0 0 1\n");            /* The case where the above is the same */
-                if (!gid_map)
-                        return -ENOMEM;
-        }
+                             ogid, ogid, gid, gid);
+        else
+                r = asprintf(&gid_map,
+                             GID_FMT " " GID_FMT " 1\n",    /* Map $OGID -> $OGID */
+                             ogid, ogid);
+
+        if (r < 0)
+                return -ENOMEM;
 
         /* Create a communication channel so that the parent can tell the child when it finished creating the user
          * namespace. */
@@ -2045,6 +2068,19 @@ static int setup_private_users(uid_t uid, gid_t gid) {
         return 0;
 }
 
+static bool exec_directory_is_private(const ExecContext *context, ExecDirectoryType type) {
+        if (!context->dynamic_user)
+                return false;
+
+        if (type == EXEC_DIRECTORY_CONFIGURATION)
+                return false;
+
+        if (type == EXEC_DIRECTORY_RUNTIME && context->runtime_directory_preserve_mode == EXEC_PRESERVE_NO)
+                return false;
+
+        return true;
+}
+
 static int setup_exec_directory(
                 const ExecContext *context,
                 const ExecParameters *params,
@@ -2091,9 +2127,7 @@ static int setup_exec_directory(
                 if (r < 0)
                         goto fail;
 
-                if (context->dynamic_user &&
-                    (!IN_SET(type, EXEC_DIRECTORY_RUNTIME, EXEC_DIRECTORY_CONFIGURATION) ||
-                     (type == EXEC_DIRECTORY_RUNTIME && context->runtime_directory_preserve_mode != EXEC_PRESERVE_NO))) {
+                if (exec_directory_is_private(context, type)) {
                         _cleanup_free_ char *private_root = NULL;
 
                         /* So, here's one extra complication when dealing with DynamicUser=1 units. In that
@@ -2369,8 +2403,7 @@ static int compile_bind_mounts(
                 if (strv_isempty(context->directories[t].paths))
                         continue;
 
-                if (context->dynamic_user &&
-                    !IN_SET(t, EXEC_DIRECTORY_RUNTIME, EXEC_DIRECTORY_CONFIGURATION) &&
+                if (exec_directory_is_private(context, t) &&
                     !(context->root_directory || context->root_image)) {
                         char *private_root;
 
@@ -2392,8 +2425,7 @@ static int compile_bind_mounts(
                 STRV_FOREACH(suffix, context->directories[t].paths) {
                         char *s, *d;
 
-                        if (context->dynamic_user &&
-                            !IN_SET(t, EXEC_DIRECTORY_RUNTIME, EXEC_DIRECTORY_CONFIGURATION))
+                        if (exec_directory_is_private(context, t))
                                 s = path_join(params->prefix[t], "private", *suffix);
                         else
                                 s = path_join(params->prefix[t], *suffix);
@@ -2402,8 +2434,7 @@ static int compile_bind_mounts(
                                 goto finish;
                         }
 
-                        if (context->dynamic_user &&
-                            !IN_SET(t, EXEC_DIRECTORY_RUNTIME, EXEC_DIRECTORY_CONFIGURATION) &&
+                        if (exec_directory_is_private(context, t) &&
                             (context->root_directory || context->root_image))
                                 /* When RootDirectory= or RootImage= are set, then the symbolic link to the private
                                  * directory is not created on the root directory. So, let's bind-mount the directory
@@ -2439,6 +2470,40 @@ static int compile_bind_mounts(
 finish:
         bind_mount_free_many(bind_mounts, h);
         return r;
+}
+
+static bool insist_on_sandboxing(
+                const ExecContext *context,
+                const char *root_dir,
+                const char *root_image,
+                const BindMount *bind_mounts,
+                size_t n_bind_mounts) {
+
+        size_t i;
+
+        assert(context);
+        assert(n_bind_mounts == 0 || bind_mounts);
+
+        /* Checks whether we need to insist on fs namespacing. i.e. whether we have settings configured that
+         * would alter the view on the file system beyond making things read-only or invisble, i.e. would
+         * rearrange stuff in a way we cannot ignore gracefully. */
+
+        if (context->n_temporary_filesystems > 0)
+                return true;
+
+        if (root_dir || root_image)
+                return true;
+
+        if (context->dynamic_user)
+                return true;
+
+        /* If there are any bind mounts set that don't map back onto themselves, fs namespacing becomes
+         * essential. */
+        for (i = 0; i < n_bind_mounts; i++)
+                if (!path_equal(bind_mounts[i].source, bind_mounts[i].destination))
+                        return true;
+
+        return false;
 }
 
 static int apply_mount_namespace(
@@ -2490,6 +2555,7 @@ static int apply_mount_namespace(
                         .protect_control_groups = context->protect_control_groups,
                         .protect_kernel_tunables = context->protect_kernel_tunables,
                         .protect_kernel_modules = context->protect_kernel_modules,
+                        .protect_kernel_logs = context->protect_kernel_logs,
                         .protect_hostname = context->protect_hostname,
                         .mount_apivfs = context->mount_apivfs,
                         .private_mounts = context->private_mounts,
@@ -2523,31 +2589,31 @@ static int apply_mount_namespace(
                             needs_sandboxing ? context->protect_home : PROTECT_HOME_NO,
                             needs_sandboxing ? context->protect_system : PROTECT_SYSTEM_NO,
                             context->mount_flags,
-                            DISSECT_IMAGE_DISCARD_ON_LOOP,
+                            DISSECT_IMAGE_DISCARD_ON_LOOP|DISSECT_IMAGE_RELAX_VAR_CHECK,
                             error_path);
-
-        bind_mount_free_many(bind_mounts, n_bind_mounts);
 
         /* If we couldn't set up the namespace this is probably due to a missing capability. setup_namespace() reports
          * that with a special, recognizable error ENOANO. In this case, silently proceed, but only if exclusively
          * sandboxing options were used, i.e. nothing such as RootDirectory= or BindMount= that would result in a
          * completely different execution environment. */
         if (r == -ENOANO) {
-                if (n_bind_mounts == 0 &&
-                    context->n_temporary_filesystems == 0 &&
-                    !root_dir && !root_image &&
-                    !context->dynamic_user) {
+                if (insist_on_sandboxing(
+                                    context,
+                                    root_dir, root_image,
+                                    bind_mounts,
+                                    n_bind_mounts)) {
+                        log_unit_debug(u, "Failed to set up namespace, and refusing to continue since the selected namespacing options alter mount environment non-trivially.\n"
+                                       "Bind mounts: %zu, temporary filesystems: %zu, root directory: %s, root image: %s, dynamic user: %s",
+                                       n_bind_mounts, context->n_temporary_filesystems, yes_no(root_dir), yes_no(root_image), yes_no(context->dynamic_user));
+
+                        r = -EOPNOTSUPP;
+                } else {
                         log_unit_debug(u, "Failed to set up namespace, assuming containerized execution and ignoring.");
-                        return 0;
+                        r = 0;
                 }
-
-                log_unit_debug(u, "Failed to set up namespace, and refusing to continue since the selected namespacing options alter mount environment non-trivially.\n"
-                               "Bind mounts: %zu, temporary filesystems: %zu, root directory: %s, root image: %s, dynamic user: %s",
-                               n_bind_mounts, context->n_temporary_filesystems, yes_no(root_dir), yes_no(root_image), yes_no(context->dynamic_user));
-
-                return -EOPNOTSUPP;
         }
 
+        bind_mount_free_many(bind_mounts, n_bind_mounts);
         return r;
 }
 
@@ -2737,7 +2803,7 @@ static int close_remaining_fds(
                 int user_lookup_fd,
                 int socket_fd,
                 int exec_fd,
-                int *fds, size_t n_fds) {
+                const int *fds, size_t n_fds) {
 
         size_t n_dont_close = 0;
         int dont_close[n_fds + 12];
@@ -2854,10 +2920,10 @@ static int compile_suggested_paths(const ExecContext *c, const ExecParameters *p
                 STRV_FOREACH(i, c->directories[t].paths) {
                         char *e;
 
-                        if (t == EXEC_DIRECTORY_RUNTIME)
-                                e = path_join(p->prefix[t], *i);
-                        else
+                        if (exec_directory_is_private(c, t))
                                 e = path_join(p->prefix[t], "private", *i);
+                        else
+                                e = path_join(p->prefix[t], *i);
                         if (!e)
                                 return -ENOMEM;
 
@@ -2930,6 +2996,7 @@ static int exec_child(
         char **final_argv = NULL;
         dev_t journal_stream_dev = 0;
         ino_t journal_stream_ino = 0;
+        bool userns_set_up = false;
         bool needs_sandboxing,          /* Do we need to set up full sandboxing? (i.e. all namespacing, all MAC stuff, caps, yadda yadda */
                 needs_setuid,           /* Do we need to do the actual setresuid()/setresgid() calls? */
                 needs_mount_namespace,  /* Do we need to set up a mount namespace for this kernel? */
@@ -2944,11 +3011,15 @@ static int exec_child(
 #if HAVE_APPARMOR
         bool use_apparmor = false;
 #endif
+        uid_t saved_uid = getuid();
+        gid_t saved_gid = getgid();
         uid_t uid = UID_INVALID;
         gid_t gid = GID_INVALID;
         size_t n_fds;
         ExecDirectoryType dt;
         int secure_bits;
+        _cleanup_free_ gid_t *gids_after_pam = NULL;
+        int ngids_after_pam = 0;
 
         assert(unit);
         assert(command);
@@ -3175,11 +3246,11 @@ static int exec_child(
                 }
         }
 
-        if (context->nice_set)
-                if (setpriority(PRIO_PROCESS, 0, context->nice) < 0) {
-                        *exit_status = EXIT_NICE;
-                        return log_unit_error_errno(unit, errno, "Failed to set up process scheduling priority (nice level): %m");
-                }
+        if (context->nice_set) {
+                r = setpriority_closest(context->nice);
+                if (r < 0)
+                        return log_unit_error_errno(unit, r, "Failed to set up process scheduling priority (nice level): %m");
+        }
 
         if (context->cpu_sched_set) {
                 struct sched_param param = {
@@ -3362,6 +3433,36 @@ static int exec_child(
                                 *exit_status = EXIT_PAM;
                                 return log_unit_error_errno(unit, r, "Failed to set up PAM session: %m");
                         }
+
+                        ngids_after_pam = getgroups_alloc(&gids_after_pam);
+                        if (ngids_after_pam < 0) {
+                                *exit_status = EXIT_MEMORY;
+                                return log_unit_error_errno(unit, ngids_after_pam, "Failed to obtain groups after setting up PAM: %m");
+                        }
+                }
+        }
+
+        if (needs_sandboxing) {
+#if HAVE_SELINUX
+                if (use_selinux && params->selinux_context_net && socket_fd >= 0) {
+                        r = mac_selinux_get_child_mls_label(socket_fd, command->path, context->selinux_context, &mac_selinux_context_net);
+                        if (r < 0) {
+                                *exit_status = EXIT_SELINUX_CONTEXT;
+                                return log_unit_error_errno(unit, r, "Failed to determine SELinux context: %m");
+                        }
+                }
+#endif
+
+                /* If we're unprivileged, set up the user namespace first to enable use of the other namespaces.
+                 * Users with CAP_SYS_ADMIN can set up user namespaces last because they will be able to
+                 * set up the all of the other namespaces (i.e. network, mount, UTS) without a user namespace. */
+                if (context->private_users && !have_effective_cap(CAP_SYS_ADMIN)) {
+                        userns_set_up = true;
+                        r = setup_private_users(saved_uid, saved_gid, uid, gid);
+                        if (r < 0) {
+                                *exit_status = EXIT_USER;
+                                return log_unit_error_errno(unit, r, "Failed to set up user namespacing for unprivileged user: %m");
+                        }
                 }
         }
 
@@ -3395,8 +3496,12 @@ static int exec_child(
         if (context->protect_hostname) {
                 if (ns_type_supported(NAMESPACE_UTS)) {
                         if (unshare(CLONE_NEWUTS) < 0) {
-                                *exit_status = EXIT_NAMESPACE;
-                                return log_unit_error_errno(unit, errno, "Failed to set up UTS namespacing: %m");
+                                if (!ERRNO_IS_NOT_SUPPORTED(errno) && !ERRNO_IS_PRIVILEGE(errno)) {
+                                        *exit_status = EXIT_NAMESPACE;
+                                        return log_unit_error_errno(unit, errno, "Failed to set up UTS namespacing: %m");
+                                }
+
+                                log_unit_warning(unit, "ProtectHostname=yes is configured, but UTS namespace setup is prohibited (container manager?), ignoring namespace setup.");
                         }
                 } else
                         log_unit_warning(unit, "ProtectHostname=yes is configured, but the kernel does not support UTS namespaces, ignoring namespace setup.");
@@ -3409,32 +3514,43 @@ static int exec_child(
 #endif
         }
 
-        /* Drop groups as early as possbile */
+        /* Drop groups as early as possible.
+         * This needs to be done after PrivateDevices=y setup as device nodes should be owned by the host's root.
+         * For non-root in a userns, devices will be owned by the user/group before the group change, and nobody. */
         if (needs_setuid) {
-                r = enforce_groups(gid, supplementary_gids, ngids);
+                _cleanup_free_ gid_t *gids_to_enforce = NULL;
+                int ngids_to_enforce = 0;
+
+                ngids_to_enforce = merge_gid_lists(supplementary_gids,
+                                                   ngids,
+                                                   gids_after_pam,
+                                                   ngids_after_pam,
+                                                   &gids_to_enforce);
+                if (ngids_to_enforce < 0) {
+                        *exit_status = EXIT_MEMORY;
+                        return log_unit_error_errno(unit,
+                                                    ngids_to_enforce,
+                                                    "Failed to merge group lists. Group membership might be incorrect: %m");
+                }
+
+                r = enforce_groups(gid, gids_to_enforce, ngids_to_enforce);
                 if (r < 0) {
                         *exit_status = EXIT_GROUP;
                         return log_unit_error_errno(unit, r, "Changing group credentials failed: %m");
                 }
         }
 
-        if (needs_sandboxing) {
-#if HAVE_SELINUX
-                if (use_selinux && params->selinux_context_net && socket_fd >= 0) {
-                        r = mac_selinux_get_child_mls_label(socket_fd, command->path, context->selinux_context, &mac_selinux_context_net);
-                        if (r < 0) {
-                                *exit_status = EXIT_SELINUX_CONTEXT;
-                                return log_unit_error_errno(unit, r, "Failed to determine SELinux context: %m");
-                        }
-                }
-#endif
+        /* If the user namespace was not set up above, try to do it now.
+         * It's preferred to set up the user namespace later (after all other namespaces) so as not to be
+         * restricted by rules pertaining to combining user namspaces with other namespaces (e.g. in the
+         * case of mount namespaces being less privileged when the mount point list is copied from a
+         * different user namespace). */
 
-                if (context->private_users) {
-                        r = setup_private_users(uid, gid);
-                        if (r < 0) {
-                                *exit_status = EXIT_USER;
-                                return log_unit_error_errno(unit, r, "Failed to set up user namespacing: %m");
-                        }
+        if (needs_sandboxing && context->private_users && !userns_set_up) {
+                r = setup_private_users(saved_uid, saved_gid, uid, gid);
+                if (r < 0) {
+                        *exit_status = EXIT_USER;
+                        return log_unit_error_errno(unit, r, "Failed to set up user namespacing: %m");
                 }
         }
 
@@ -3538,8 +3654,7 @@ static int exec_child(
 
                 /* This is done before enforce_user, but ambient set
                  * does not survive over setresuid() if keep_caps is not set. */
-                if (!needs_ambient_hack &&
-                    context->capability_ambient_set != 0) {
+                if (!needs_ambient_hack) {
                         r = capability_ambient_set_apply(context->capability_ambient_set, true);
                         if (r < 0) {
                                 *exit_status = EXIT_CAPABILITIES;
@@ -3674,6 +3789,12 @@ static int exec_child(
                 if (r < 0) {
                         *exit_status = EXIT_SECCOMP;
                         return log_unit_error_errno(unit, r, "Failed to apply module loading restrictions: %m");
+                }
+
+                r = apply_protect_kernel_logs(unit, context);
+                if (r < 0) {
+                        *exit_status = EXIT_SECCOMP;
+                        return log_unit_error_errno(unit, r, "Failed to apply kernel log restrictions: %m");
                 }
 
                 r = apply_private_devices(unit, context);
@@ -3924,6 +4045,7 @@ void exec_context_init(ExecContext *c) {
         c->personality = PERSONALITY_INVALID;
         for (i = 0; i < _EXEC_DIRECTORY_TYPE_MAX; i++)
                 c->directories[i].mode = 0755;
+        c->timeout_clean_usec = USEC_INFINITY;
         c->capability_bounding_set = CAP_ALL;
         assert_cc(NAMESPACE_FLAGS_INITIAL != NAMESPACE_FLAGS_ALL);
         c->restrict_namespaces = NAMESPACE_FLAGS_INITIAL;
@@ -3991,8 +4113,8 @@ void exec_context_done(ExecContext *c) {
 
         exec_context_free_log_extra_fields(c);
 
-        c->log_rate_limit_interval_usec = 0;
-        c->log_rate_limit_burst = 0;
+        c->log_ratelimit_interval_usec = 0;
+        c->log_ratelimit_burst = 0;
 
         c->stdin_data = mfree(c->stdin_data);
         c->stdin_data_size = 0;
@@ -4011,7 +4133,10 @@ int exec_context_destroy_runtime_directory(const ExecContext *c, const char *run
         STRV_FOREACH(i, c->directories[EXEC_DIRECTORY_RUNTIME].paths) {
                 _cleanup_free_ char *p;
 
-                p = path_join(runtime_prefix, *i);
+                if (exec_directory_is_private(c, EXEC_DIRECTORY_RUNTIME))
+                        p = path_join(runtime_prefix, "private", *i);
+                else
+                        p = path_join(runtime_prefix, *i);
                 if (!p)
                         return -ENOMEM;
 
@@ -4292,8 +4417,8 @@ static void strv_fprintf(FILE *f, char **l) {
 }
 
 void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
+        char **e, **d, buf_clean[FORMAT_TIMESPAN_MAX];
         ExecDirectoryType dt;
-        char **e, **d;
         unsigned i;
         int r;
 
@@ -4311,6 +4436,7 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
                 "%sPrivateDevices: %s\n"
                 "%sProtectKernelTunables: %s\n"
                 "%sProtectKernelModules: %s\n"
+                "%sProtectKernelLogs: %s\n"
                 "%sProtectControlGroups: %s\n"
                 "%sPrivateNetwork: %s\n"
                 "%sPrivateUsers: %s\n"
@@ -4331,6 +4457,7 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
                 prefix, yes_no(c->private_devices),
                 prefix, yes_no(c->protect_kernel_tunables),
                 prefix, yes_no(c->protect_kernel_modules),
+                prefix, yes_no(c->protect_kernel_logs),
                 prefix, yes_no(c->protect_control_groups),
                 prefix, yes_no(c->private_network),
                 prefix, yes_no(c->private_users),
@@ -4367,6 +4494,10 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
                 STRV_FOREACH(d, c->directories[dt].paths)
                         fprintf(f, "%s%s: %s\n", prefix, exec_directory_type_to_string(dt), *d);
         }
+
+        fprintf(f,
+                "%sTimeoutCleanSec: %s\n",
+                prefix, format_timespan(buf_clean, sizeof(buf_clean), c->timeout_clean_usec, USEC_PER_SEC));
 
         if (c->nice_set)
                 fprintf(f,
@@ -4499,16 +4630,16 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
                 fprintf(f, "%sLogLevelMax: %s\n", prefix, strna(t));
         }
 
-        if (c->log_rate_limit_interval_usec > 0) {
+        if (c->log_ratelimit_interval_usec > 0) {
                 char buf_timespan[FORMAT_TIMESPAN_MAX];
 
                 fprintf(f,
                         "%sLogRateLimitIntervalSec: %s\n",
-                        prefix, format_timespan(buf_timespan, sizeof(buf_timespan), c->log_rate_limit_interval_usec, USEC_PER_SEC));
+                        prefix, format_timespan(buf_timespan, sizeof(buf_timespan), c->log_ratelimit_interval_usec, USEC_PER_SEC));
         }
 
-        if (c->log_rate_limit_burst > 0)
-                fprintf(f, "%sLogRateLimitBurst: %u\n", prefix, c->log_rate_limit_burst);
+        if (c->log_ratelimit_burst > 0)
+                fprintf(f, "%sLogRateLimitBurst: %u\n", prefix, c->log_ratelimit_burst);
 
         if (c->n_log_extra_fields > 0) {
                 size_t j;
@@ -4811,6 +4942,17 @@ int exec_context_get_clean_directories(
                         r = strv_consume(&l, j);
                         if (r < 0)
                                 return r;
+
+                        /* Also remove private directories unconditionally. */
+                        if (t != EXEC_DIRECTORY_CONFIGURATION) {
+                                j = path_join(prefix[t], "private", *i);
+                                if (!j)
+                                        return -ENOMEM;
+
+                                r = strv_consume(&l, j);
+                                if (r < 0)
+                                        return r;
+                        }
                 }
         }
 

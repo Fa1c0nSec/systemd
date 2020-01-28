@@ -2,8 +2,10 @@
 
 #include "alloc-util.h"
 #include "format-util.h"
+#include "libcrypt-util.h"
 #include "log.h"
 #include "macro.h"
+#include "memory-util.h"
 #include "path-util.h"
 #include "string-util.h"
 #include "user-util.h"
@@ -61,6 +63,43 @@ static void test_uid_ptr(void) {
         assert_se(PTR_TO_UID(UID_TO_PTR(1000)) == 1000);
 }
 
+static void test_valid_user_group_name_compat(void) {
+        log_info("/* %s */", __func__);
+
+        assert_se(!valid_user_group_name_compat(NULL));
+        assert_se(!valid_user_group_name_compat(""));
+        assert_se(!valid_user_group_name_compat("1"));
+        assert_se(!valid_user_group_name_compat("65535"));
+        assert_se(!valid_user_group_name_compat("-1"));
+        assert_se(!valid_user_group_name_compat("-kkk"));
+        assert_se(!valid_user_group_name_compat("rööt"));
+        assert_se(!valid_user_group_name_compat("."));
+        assert_se(!valid_user_group_name_compat(".eff"));
+        assert_se(!valid_user_group_name_compat("foo\nbar"));
+        assert_se(!valid_user_group_name_compat("0123456789012345678901234567890123456789"));
+        assert_se(!valid_user_group_name_or_id_compat("aaa:bbb"));
+        assert_se(!valid_user_group_name_compat("."));
+        assert_se(!valid_user_group_name_compat(".1"));
+        assert_se(!valid_user_group_name_compat(".65535"));
+        assert_se(!valid_user_group_name_compat(".-1"));
+        assert_se(!valid_user_group_name_compat(".-kkk"));
+        assert_se(!valid_user_group_name_compat(".rööt"));
+        assert_se(!valid_user_group_name_or_id_compat(".aaa:bbb"));
+
+        assert_se(valid_user_group_name_compat("root"));
+        assert_se(valid_user_group_name_compat("lennart"));
+        assert_se(valid_user_group_name_compat("LENNART"));
+        assert_se(valid_user_group_name_compat("_kkk"));
+        assert_se(valid_user_group_name_compat("kkk-"));
+        assert_se(valid_user_group_name_compat("kk-k"));
+        assert_se(valid_user_group_name_compat("eff.eff"));
+        assert_se(valid_user_group_name_compat("eff."));
+
+        assert_se(valid_user_group_name_compat("some5"));
+        assert_se(!valid_user_group_name_compat("5some"));
+        assert_se(valid_user_group_name_compat("INNER5NUMBER"));
+}
+
 static void test_valid_user_group_name(void) {
         log_info("/* %s */", __func__);
 
@@ -72,10 +111,17 @@ static void test_valid_user_group_name(void) {
         assert_se(!valid_user_group_name("-kkk"));
         assert_se(!valid_user_group_name("rööt"));
         assert_se(!valid_user_group_name("."));
-        assert_se(!valid_user_group_name("eff.eff"));
+        assert_se(!valid_user_group_name(".eff"));
         assert_se(!valid_user_group_name("foo\nbar"));
         assert_se(!valid_user_group_name("0123456789012345678901234567890123456789"));
         assert_se(!valid_user_group_name_or_id("aaa:bbb"));
+        assert_se(!valid_user_group_name("."));
+        assert_se(!valid_user_group_name(".1"));
+        assert_se(!valid_user_group_name(".65535"));
+        assert_se(!valid_user_group_name(".-1"));
+        assert_se(!valid_user_group_name(".-kkk"));
+        assert_se(!valid_user_group_name(".rööt"));
+        assert_se(!valid_user_group_name_or_id(".aaa:bbb"));
 
         assert_se(valid_user_group_name("root"));
         assert_se(valid_user_group_name("lennart"));
@@ -83,10 +129,45 @@ static void test_valid_user_group_name(void) {
         assert_se(valid_user_group_name("_kkk"));
         assert_se(valid_user_group_name("kkk-"));
         assert_se(valid_user_group_name("kk-k"));
+        assert_se(!valid_user_group_name("eff.eff"));
+        assert_se(!valid_user_group_name("eff."));
 
         assert_se(valid_user_group_name("some5"));
         assert_se(!valid_user_group_name("5some"));
         assert_se(valid_user_group_name("INNER5NUMBER"));
+}
+
+static void test_valid_user_group_name_or_id_compat(void) {
+        log_info("/* %s */", __func__);
+
+        assert_se(!valid_user_group_name_or_id_compat(NULL));
+        assert_se(!valid_user_group_name_or_id_compat(""));
+        assert_se(valid_user_group_name_or_id_compat("0"));
+        assert_se(valid_user_group_name_or_id_compat("1"));
+        assert_se(valid_user_group_name_or_id_compat("65534"));
+        assert_se(!valid_user_group_name_or_id_compat("65535"));
+        assert_se(valid_user_group_name_or_id_compat("65536"));
+        assert_se(!valid_user_group_name_or_id_compat("-1"));
+        assert_se(!valid_user_group_name_or_id_compat("-kkk"));
+        assert_se(!valid_user_group_name_or_id_compat("rööt"));
+        assert_se(!valid_user_group_name_or_id_compat("."));
+        assert_se(!valid_user_group_name_or_id_compat(".eff"));
+        assert_se(valid_user_group_name_or_id_compat("eff.eff"));
+        assert_se(valid_user_group_name_or_id_compat("eff."));
+        assert_se(!valid_user_group_name_or_id_compat("foo\nbar"));
+        assert_se(!valid_user_group_name_or_id_compat("0123456789012345678901234567890123456789"));
+        assert_se(!valid_user_group_name_or_id_compat("aaa:bbb"));
+
+        assert_se(valid_user_group_name_or_id_compat("root"));
+        assert_se(valid_user_group_name_or_id_compat("lennart"));
+        assert_se(valid_user_group_name_or_id_compat("LENNART"));
+        assert_se(valid_user_group_name_or_id_compat("_kkk"));
+        assert_se(valid_user_group_name_or_id_compat("kkk-"));
+        assert_se(valid_user_group_name_or_id_compat("kk-k"));
+
+        assert_se(valid_user_group_name_or_id_compat("some5"));
+        assert_se(!valid_user_group_name_or_id_compat("5some"));
+        assert_se(valid_user_group_name_or_id_compat("INNER5NUMBER"));
 }
 
 static void test_valid_user_group_name_or_id(void) {
@@ -103,7 +184,9 @@ static void test_valid_user_group_name_or_id(void) {
         assert_se(!valid_user_group_name_or_id("-kkk"));
         assert_se(!valid_user_group_name_or_id("rööt"));
         assert_se(!valid_user_group_name_or_id("."));
+        assert_se(!valid_user_group_name_or_id(".eff"));
         assert_se(!valid_user_group_name_or_id("eff.eff"));
+        assert_se(!valid_user_group_name_or_id("eff."));
         assert_se(!valid_user_group_name_or_id("foo\nbar"));
         assert_se(!valid_user_group_name_or_id("0123456789012345678901234567890123456789"));
         assert_se(!valid_user_group_name_or_id("aaa:bbb"));
@@ -205,6 +288,44 @@ static void test_make_salt(void) {
         assert(!streq(s, t));
 }
 
+static void test_in_gid(void) {
+        assert(in_gid(getgid()) >= 0);
+        assert(in_gid(getegid()) >= 0);        assert(in_gid(TTY_GID) == 0); /* The TTY gid is for owning ttys, it would be really really weird if we were in it. */
+}
+
+static void test_gid_lists_ops(void) {
+        static const gid_t l1[] = { 5, 10, 15, 20, 25};
+        static const gid_t l2[] = { 1, 2, 3, 15, 20, 25};
+        static const gid_t l3[] = { 5, 10, 15, 20, 25, 26, 27};
+        static const gid_t l4[] = { 25, 26, 20, 15, 5, 27, 10};
+
+        static const gid_t result1[] = {1, 2, 3, 5, 10, 15, 20, 25, 26, 27};
+        static const gid_t result2[] = {5, 10, 15, 20, 25, 26, 27};
+
+        _cleanup_free_ gid_t *gids = NULL;
+        _cleanup_free_ gid_t *res1 = NULL;
+        _cleanup_free_ gid_t *res2 = NULL;
+        _cleanup_free_ gid_t *res3 = NULL;
+        _cleanup_free_ gid_t *res4 = NULL;
+        int nresult;
+
+        nresult = merge_gid_lists(l2, ELEMENTSOF(l2), l3, ELEMENTSOF(l3), &res1);
+        assert_se(memcmp_nn(res1, nresult, result1, ELEMENTSOF(result1)) == 0);
+
+        nresult = merge_gid_lists(NULL, 0, l2, ELEMENTSOF(l2), &res2);
+        assert_se(memcmp_nn(res2, nresult, l2, ELEMENTSOF(l2)) == 0);
+
+        nresult = merge_gid_lists(l1, ELEMENTSOF(l1), l1, ELEMENTSOF(l1), &res3);
+        assert_se(memcmp_nn(l1, ELEMENTSOF(l1), res3, nresult) == 0);
+
+        nresult = merge_gid_lists(l1, ELEMENTSOF(l1), l4, ELEMENTSOF(l4), &res4);
+        assert_se(memcmp_nn(result2, ELEMENTSOF(result2), res4, nresult) == 0);
+
+        nresult = getgroups_alloc(&gids);
+        assert_se(nresult >= 0 || nresult == -EINVAL || nresult == -ENOMEM);
+        assert_se(gids);
+}
+
 int main(int argc, char *argv[]) {
         test_uid_to_name_one(0, "root");
         test_uid_to_name_one(UID_NOBODY, NOBODY_USER_NAME);
@@ -230,12 +351,17 @@ int main(int argc, char *argv[]) {
         test_parse_uid();
         test_uid_ptr();
 
+        test_valid_user_group_name_compat();
         test_valid_user_group_name();
+        test_valid_user_group_name_or_id_compat();
         test_valid_user_group_name_or_id();
         test_valid_gecos();
         test_valid_home();
 
         test_make_salt();
+
+        test_in_gid();
+        test_gid_lists_ops();
 
         return 0;
 }

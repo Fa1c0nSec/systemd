@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <grp.h>
-#include <pwd.h>
 #include <stdio.h>
 #include <sys/prctl.h>
 #include <sys/types.h>
@@ -22,7 +20,6 @@
 #endif
 #include "service.h"
 #include "stat-util.h"
-#include "test-helper.h"
 #include "tests.h"
 #include "unit.h"
 #include "user-util.h"
@@ -37,6 +34,11 @@ static int cld_dumped_to_killed(int code) {
         /* Depending on the system, seccomp version, … some signals might result in dumping, others in plain
          * killing. Let's ignore the difference here, and map both cases to CLD_KILLED */
         return code == CLD_DUMPED ? CLD_KILLED : code;
+}
+
+_unused_ static bool is_run_on_travis_ci(void) {
+        /* https://docs.travis-ci.com/user/environment-variables#default-environment-variables */
+        return streq_ptr(getenv("TRAVIS"), "true");
 }
 
 static void wait_for_service_finish(Manager *m, Unit *unit) {
@@ -311,6 +313,7 @@ static void test_exec_privatedevices(Manager *m) {
         test(__func__, m, "exec-privatedevices-yes.service", can_unshare ? 0 : EXIT_FAILURE, CLD_EXITED);
         test(__func__, m, "exec-privatedevices-no.service", 0, CLD_EXITED);
         test(__func__, m, "exec-privatedevices-disabled-by-prefix.service", can_unshare ? 0 : EXIT_FAILURE, CLD_EXITED);
+        test(__func__, m, "exec-privatedevices-yes-with-group.service", can_unshare ? 0 : EXIT_FAILURE, CLD_EXITED);
 
         /* We use capsh to test if the capabilities are
          * properly set, so be sure that it exists */
@@ -753,6 +756,7 @@ static void test_exec_specifier(Manager *m) {
 static void test_exec_standardinput(Manager *m) {
         test(__func__, m, "exec-standardinput-data.service", 0, CLD_EXITED);
         test(__func__, m, "exec-standardinput-file.service", 0, CLD_EXITED);
+        test(__func__, m, "exec-standardinput-file-cat.service", 0, CLD_EXITED);
 }
 
 static void test_exec_standardoutput(Manager *m) {
@@ -783,7 +787,8 @@ static int run_tests(UnitFileScope scope, const test_entry tests[], char **patte
         assert_se(tests);
 
         r = manager_new(scope, MANAGER_TEST_RUN_BASIC, &m);
-        if (MANAGER_SKIP_TEST(r))
+        m->default_std_output = EXEC_OUTPUT_NULL; /* don't rely on host journald */
+        if (manager_errno_skip_test(r))
                 return log_tests_skipped_errno(r, "manager_new");
         assert_se(r >= 0);
         assert_se(manager_startup(m, NULL, NULL) >= 0);
@@ -867,7 +872,7 @@ int main(int argc, char *argv[]) {
         if (getuid() != 0)
                 return log_tests_skipped("not root");
 
-        r = enter_cgroup_subroot();
+        r = enter_cgroup_subroot(NULL);
         if (r == -ENOMEDIUM)
                 return log_tests_skipped("cgroupfs not available");
 

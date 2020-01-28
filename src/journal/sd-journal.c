@@ -31,7 +31,6 @@
 #include "journal-internal.h"
 #include "list.h"
 #include "lookup3.h"
-#include "missing.h"
 #include "nulstr-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -162,7 +161,7 @@ static int match_is_valid(const void *data, size_t size) {
         if (size < 2)
                 return false;
 
-        if (startswith(data, "__"))
+        if (((char*) data)[0] == '_' && ((char*) data)[1] == '_')
                 return false;
 
         b = data;
@@ -909,7 +908,7 @@ _public_ int sd_journal_previous_skip(sd_journal *j, uint64_t skip) {
 _public_ int sd_journal_get_cursor(sd_journal *j, char **cursor) {
         Object *o;
         int r;
-        char bid[33], sid[33];
+        char bid[SD_ID128_STRING_MAX], sid[SD_ID128_STRING_MAX];
 
         assert_return(j, -EINVAL);
         assert_return(!journal_pid_changed(j), -ECHILD);

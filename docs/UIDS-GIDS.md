@@ -1,8 +1,10 @@
 ---
-title: Users, Groups, UIDs and GIDs on `systemd` Systems
+title: Users, Groups, UIDs and GIDs on systemd Systems
+category: Concepts
+layout: default
 ---
 
-# Users, Groups, UIDs and GIDs on `systemd` Systems
+# Users, Groups, UIDs and GIDs on systemd Systems
 
 Here's a summary of the requirements `systemd` (and Linux) make on UID/GID
 assignments and their ranges.
@@ -237,7 +239,7 @@ the artifacts the container manager persistently leaves in the system.
 |                 65535 | 16bit `(uid_t) -1`    | Linux         |                               |
 |          65536…524287 | Unused                |               |                               |
 |     524288…1879048191 | Container UID ranges  | `systemd`     | `nss-mymachines`              |
-| 1879048191…2147483647 | Unused                |               |                               |
+| 1879048192…2147483647 | Unused                |               |                               |
 | 2147483648…4294967294 | HIC SVNT LEONES       |               |                               |
 |            4294967295 | 32bit `(uid_t) -1`    | Linux         |                               |
 

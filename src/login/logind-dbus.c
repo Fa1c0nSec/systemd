@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <errno.h>
-#include <pwd.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -20,6 +18,7 @@
 #include "device-util.h"
 #include "dirent-util.h"
 #include "efivars.h"
+#include "efi-loader.h"
 #include "env-util.h"
 #include "escape.h"
 #include "fd-util.h"
@@ -115,7 +114,6 @@ int manager_get_session_from_creds(
         Session *session;
 
         assert(m);
-        assert(message);
         assert(ret);
 
         if (SEAT_IS_SELF(name)) /* the caller's own session */
@@ -163,7 +161,6 @@ int manager_get_user_from_creds(Manager *m, sd_bus_message *message, uid_t uid, 
         User *user;
 
         assert(m);
-        assert(message);
         assert(ret);
 
         if (!uid_is_valid(uid))
@@ -189,7 +186,6 @@ int manager_get_seat_from_creds(
         int r;
 
         assert(m);
-        assert(message);
         assert(ret);
 
         if (SEAT_IS_SELF(name) || SEAT_IS_AUTO(name)) {
@@ -540,8 +536,8 @@ static int method_list_sessions(sd_bus_message *message, void *userdata, sd_bus_
 
                 r = sd_bus_message_append(reply, "(susso)",
                                           session->id,
-                                          (uint32_t) session->user->uid,
-                                          session->user->name,
+                                          (uint32_t) session->user->user_record->uid,
+                                          session->user->user_record->user_name,
                                           session->seat ? session->seat->id : "",
                                           p);
                 if (r < 0)
@@ -581,8 +577,8 @@ static int method_list_users(sd_bus_message *message, void *userdata, sd_bus_err
                         return -ENOMEM;
 
                 r = sd_bus_message_append(reply, "(uso)",
-                                          (uint32_t) user->uid,
-                                          user->name,
+                                          (uint32_t) user->user_record->uid,
+                                          user->user_record->user_name,
                                           p);
                 if (r < 0)
                         return r;
@@ -1379,6 +1375,7 @@ static int flush_devices(Manager *m) {
                 struct dirent *de;
 
                 FOREACH_DIRENT_ALL(de, d, break) {
+                        dirent_ensure_type(d, de);
                         if (!dirent_is_file(de))
                                 continue;
 
@@ -1491,7 +1488,7 @@ static int have_multiple_sessions(
          * count, and non-login sessions do not count either. */
         HASHMAP_FOREACH(session, m->sessions, i)
                 if (session->class == SESSION_USER &&
-                    session->user->uid != uid)
+                    session->user->user_record->uid != uid)
                         return true;
 
         return false;

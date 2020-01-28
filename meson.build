@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: LGPL-2.1+
 
 project('systemd', 'c',
-        version : '243',
+        version : '244',
         license : 'LGPLv2+',
         default_options: [
                 'c_std=gnu99',
                 'prefix=/usr',
                 'sysconfdir=/etc',
                 'localstatedir=/var',
+                'warning_level=2',
         ],
         meson_version : '>= 0.46',
        )
 
-libsystemd_version = '0.27.0'
-libudev_version = '1.6.15'
+libsystemd_version = '0.27.1'
+libudev_version = '1.6.16'
 
 # We need the same data in two different formats, ugh!
 # Also, for hysterical reasons, we use different variable
@@ -242,6 +243,7 @@ conf.set_quoted('SYSTEMD_EXPORT_PATH',                        join_paths(rootlib
 conf.set_quoted('VENDOR_KEYRING_PATH',                        join_paths(rootlibexecdir, 'import-pubring.gpg'))
 conf.set_quoted('USER_KEYRING_PATH',                          join_paths(pkgsysconfdir, 'import-pubring.gpg'))
 conf.set_quoted('DOCUMENT_ROOT',                              join_paths(pkgdatadir, 'gatewayd'))
+conf.set_quoted('SYSTEMD_USERWORK_PATH',                      join_paths(rootlibexecdir, 'systemd-userwork'))
 conf.set10('MEMORY_ACCOUNTING_DEFAULT',                       memory_accounting_default)
 conf.set_quoted('MEMORY_ACCOUNTING_DEFAULT_YES_NO',           memory_accounting_default ? 'yes' : 'no')
 conf.set('STATUS_UNIT_FORMAT_DEFAULT',                        'STATUS_UNIT_FORMAT_' + status_unit_format_default.to_upper())
@@ -279,7 +281,6 @@ substs.set('userenvgeneratordir',                             userenvgeneratordi
 substs.set('systemshutdowndir',                               systemshutdowndir)
 substs.set('systemsleepdir',                                  systemsleepdir)
 substs.set('CERTIFICATEROOT',                                 get_option('certificate-root'))
-substs.set('SYSTEMCTL',                                       join_paths(rootbindir, 'systemctl'))
 substs.set('RANDOM_SEED',                                     join_paths(randomseeddir, 'random-seed'))
 substs.set('SYSTEM_SYSVINIT_PATH',                            sysvinit_path)
 substs.set('SYSTEM_SYSVRCND_PATH',                            sysvrcnd_path)
@@ -302,7 +303,8 @@ install_tests = get_option('install-tests')
 
 if add_languages('cpp', required : fuzzer_build)
         #  Used only for tests
-        cxx_cmd = ' '.join(meson.get_compiler('cpp').cmd_array())
+        cxx = meson.get_compiler('cpp')
+        cxx_cmd = ' '.join(cxx.cmd_array())
 else
         cxx_cmd = ''
 endif
@@ -322,8 +324,25 @@ elif want_fuzzbuzz
         fuzzing_engine = meson.get_compiler('cpp').find_library(get_option('fuzzbuzz-engine'), dirs: get_option('fuzzbuzz-engine-dir'))
 endif
 
+# Those generate many false positives, and we do not want to change the code to
+# avoid them.
+basic_disabled_warnings = [
+        '-Wno-unused-parameter',
+        '-Wno-missing-field-initializers',
+        '-Wno-unused-result',
+        '-Wno-format-signedness',
+]
+if get_option('b_ndebug') == 'true'
+        # With asserts disabled with get a bunch of warnings about variables which
+        # are used only in the asserts. This is not useful at all, so let's just silence
+        # those warnings.
+        basic_disabled_warnings += [
+                '-Wno-unused-variable',
+                '-Wno-unused-but-set-variable',
+        ]
+endif
+
 possible_cc_flags = [
-        '-Wextra',
         '-Werror=undef',
         '-Wlogical-op',
         '-Wmissing-include-dirs',
@@ -353,10 +372,6 @@ possible_cc_flags = [
         '-Wnested-externs',
 
         # negative arguments are correctly detected starting with meson 0.46.
-        '-Wno-unused-parameter',
-        '-Wno-missing-field-initializers',
-        '-Wno-unused-result',
-        '-Wno-format-signedness',
         '-Wno-error=#warnings',  # clang
         '-Wno-string-plus-int',  # clang
 
@@ -382,6 +397,7 @@ possible_cc_flags = [
 possible_link_flags = [
         '-Wl,-z,relro',
         '-Wl,-z,now',
+        '-fstack-protector',
 ]
 
 if cc.get_id() == 'clang'
@@ -400,16 +416,7 @@ if get_option('buildtype') != 'debug'
         possible_link_flags += '-Wl,--gc-sections'
 endif
 
-if get_option('b_ndebug') == 'true'
-        # With asserts disabled with get a bunch of warnings about variables which
-        # are used only in the asserts. This is not useful at all, so let's just silence
-        # those warnings.
-        possible_cc_flags += [
-                '-Wno-unused-variable',
-                '-Wno-unused-but-set-variable',
-        ]
-endif
-
+add_project_arguments(cc.get_supported_arguments(basic_disabled_warnings), language : 'c')
 add_project_arguments(cc.get_supported_arguments(possible_cc_flags), language : 'c')
 add_project_link_arguments(cc.get_supported_link_arguments(possible_link_flags), language : 'c')
 
@@ -424,6 +431,10 @@ if cc.compiles('''
    }
 ''', args: '-Werror=shadow', name : '-Werror=shadow with local shadowing')
         add_project_arguments('-Werror=shadow', language : 'c')
+endif
+
+if cxx_cmd != ''
+        add_project_arguments(cxx.get_supported_arguments(basic_disabled_warnings), language : 'cpp')
 endif
 
 cpp = ' '.join(cc.cmd_array()) + ' -E'
@@ -506,6 +517,18 @@ foreach ident : [
                                  #include <unistd.h>'''],
         ['get_mempolicy',     '''#include <stdlib.h>
                                  #include <unistd.h>'''],
+        ['pidfd_send_signal', '''#include <stdlib.h>
+                                 #include <unistd.h>
+                                 #include <signal.h>
+                                 #include <sys/wait.h>'''],
+        ['pidfd_open',        '''#include <stdlib.h>
+                                 #include <unistd.h>
+                                 #include <signal.h>
+                                 #include <sys/wait.h>'''],
+        ['rt_sigqueueinfo',   '''#include <stdlib.h>
+                                 #include <unistd.h>
+                                 #include <signal.h>
+                                 #include <sys/wait.h>'''],
 ]
 
         have = cc.has_function(ident[0], prefix : ident[1], args : '-D_GNU_SOURCE')
@@ -794,6 +817,10 @@ conf.set_quoted('SYSTEMD_DEFAULT_LOCALE', default_locale)
 
 conf.set_quoted('GETTEXT_PACKAGE', meson.project_name())
 
+service_watchdog = get_option('service-watchdog')
+watchdog_value = service_watchdog == '' ? '' : 'WatchdogSec=' + service_watchdog
+substs.set('SERVICE_WATCHDOG', watchdog_value)
+
 substs.set('SUSHELL', get_option('debug-shell'))
 substs.set('DEBUGTTY', get_option('debug-tty'))
 conf.set_quoted('DEBUGTTY', get_option('debug-tty'))
@@ -819,6 +846,16 @@ conf.set10('ENABLE_DEBUG_SIPHASH', enable_debug_siphash)
 conf.set10('VALGRIND', get_option('valgrind'))
 conf.set10('LOG_TRACE', get_option('log-trace'))
 
+default_user_path = get_option('user-path')
+if default_user_path != ''
+        conf.set_quoted('DEFAULT_USER_PATH', default_user_path)
+        default_user_path_display = default_user_path
+else
+        # meson 0.49 fails when ?: is used in .format()
+        default_user_path_display = '(same as system services)'
+endif
+
+
 #####################################################################
 
 threads = dependency('threads')
@@ -835,6 +872,17 @@ endif
 
 libmount = dependency('mount',
                       version : fuzzer_build ? '>= 0' : '>= 2.30')
+
+want_libfdisk = get_option('fdisk')
+if want_libfdisk != 'false' and not skip_deps
+        libfdisk = dependency('fdisk',
+                              required : want_libfdisk == 'true')
+        have = libfdisk.found()
+else
+        have = false
+        libfdisk = []
+endif
+conf.set10('HAVE_LIBFDISK', have)
 
 want_seccomp = get_option('seccomp')
 if want_seccomp != 'false' and not skip_deps
@@ -960,20 +1008,14 @@ conf.set10('HAVE_MICROHTTPD', have)
 want_libcryptsetup = get_option('libcryptsetup')
 if want_libcryptsetup != 'false' and not skip_deps
         libcryptsetup = dependency('libcryptsetup',
-                                   version : '>= 1.6.0',
+                                   version : '>= 2.0.1',
                                    required : want_libcryptsetup == 'true')
         have = libcryptsetup.found()
-        have_sector = cc.has_member(
-                    'struct crypt_params_plain',
-                    'sector_size',
-                    prefix : '#include <libcryptsetup.h>')
 else
         have = false
-        have_sector = false
         libcryptsetup = []
 endif
 conf.set10('HAVE_LIBCRYPTSETUP', have)
-conf.set10('HAVE_LIBCRYPTSETUP_SECTOR_SIZE', have_sector)
 
 want_libcurl = get_option('libcurl')
 if want_libcurl != 'false' and not skip_deps
@@ -1072,6 +1114,18 @@ else
         libopenssl = []
 endif
 conf.set10('HAVE_OPENSSL', have)
+
+want_p11kit = get_option('p11kit')
+if want_p11kit != 'false' and not skip_deps
+        libp11kit = dependency('p11-kit-1',
+                                version : '>= 0.23.3',
+                                required : want_p11kit == 'true')
+        have = libp11kit.found()
+else
+        have = false
+        libp11kit = []
+endif
+conf.set10('HAVE_P11KIT', have)
 
 want_elfutils = get_option('elfutils')
 if want_elfutils != 'false' and not skip_deps
@@ -1200,7 +1254,7 @@ if dns_over_tls != 'false'
         if dns_over_tls == 'openssl'
                 have_gnutls = false
         else
-                have_gnutls = (conf.get('HAVE_GNUTLS') == 1 and libgnutls.version().version_compare('>= 3.5.3'))
+                have_gnutls = (conf.get('HAVE_GNUTLS') == 1 and libgnutls.version().version_compare('>= 3.6.0'))
                 if dns_over_tls == 'gnutls' and not have_gnutls
                         error('DNS-over-TLS support was requested with gnutls, but dependencies are not available')
                 endif
@@ -1235,6 +1289,18 @@ endif
 conf.set('DEFAULT_DNS_OVER_TLS_MODE',
          'DNS_OVER_TLS_' + default_dns_over_tls.underscorify().to_upper())
 substs.set('DEFAULT_DNS_OVER_TLS_MODE', default_dns_over_tls)
+
+want_repart = get_option('repart')
+if want_repart != 'false'
+        have = (conf.get('HAVE_OPENSSL') == 1 and
+                conf.get('HAVE_LIBFDISK') == 1)
+        if want_repart == 'true' and not have
+                error('repart support was requested, but dependencies are not available')
+        endif
+else
+        have = false
+endif
+conf.set10('ENABLE_REPART', have)
 
 want_importd = get_option('importd')
 if want_importd != 'false'
@@ -1279,6 +1345,7 @@ foreach term : ['utmp',
                 'localed',
                 'machined',
                 'portabled',
+                'userdb',
                 'networkd',
                 'timedated',
                 'timesyncd',
@@ -1469,6 +1536,9 @@ install_libsystemd_static = static_library(
                         libgcrypt],
         c_args : libsystemd_c_args + (static_libsystemd_pic ? [] : ['-fno-PIC']))
 
+#Generate autosuspend rules
+make_autosuspend_rules_py = find_program('tools/make-autosuspend-rules.py')
+
 ############################################################
 
 # binaries that have --help and are intended for use by humans,
@@ -1488,10 +1558,12 @@ subdir('src/coredump')
 subdir('src/pstore')
 subdir('src/hostname')
 subdir('src/import')
+subdir('src/partition')
 subdir('src/kernel-install')
 subdir('src/locale')
 subdir('src/machine')
 subdir('src/portable')
+subdir('src/userdb')
 subdir('src/nspawn')
 subdir('src/resolve')
 subdir('src/timedate')
@@ -1501,7 +1573,7 @@ subdir('src/boot/efi')
 
 subdir('src/test')
 subdir('src/fuzz')
-subdir('rules')
+subdir('rules.d')
 subdir('test')
 
 ############################################################
@@ -1518,7 +1590,7 @@ test_dlopen = executable(
         build_by_default : want_tests != 'false')
 
 foreach tuple : [['myhostname', 'ENABLE_NSS_MYHOSTNAME'],
-                 ['systemd',    'ENABLE_NSS_SYSTEMD'],
+                 ['systemd',    'ENABLE_NSS_SYSTEMD', 'src/nss-systemd/userdb-glue.c src/nss-systemd/userdb-glue.h'],
                  ['mymachines', 'ENABLE_NSS_MYMACHINES'],
                  ['resolve',    'ENABLE_NSS_RESOLVE']]
 
@@ -1529,9 +1601,14 @@ foreach tuple : [['myhostname', 'ENABLE_NSS_MYHOSTNAME'],
                 sym = 'src/nss-@0@/nss-@0@.sym'.format(module)
                 version_script_arg = join_paths(project_source_root, sym)
 
+                sources = ['src/nss-@0@/nss-@0@.c'.format(module)]
+                if tuple.length() > 2
+                        sources += tuple[2].split()
+                endif
+
                 nss = shared_library(
                         'nss_' + module,
-                        'src/nss-@0@/nss-@0@.c'.format(module),
+                        sources,
                         disable_mempool_c,
                         version : '2',
                         include_directories : includes,
@@ -1928,6 +2005,35 @@ if conf.get('ENABLE_PORTABLED') == 1
         public_programs += exe
 endif
 
+if conf.get('ENABLE_USERDB') == 1
+        executable('systemd-userwork',
+                   systemd_userwork_sources,
+                   include_directories : includes,
+                   link_with : [libshared],
+                   dependencies : [threads],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootlibexecdir)
+
+        executable('systemd-userdbd',
+                   systemd_userdbd_sources,
+                   include_directories : includes,
+                   link_with : [libshared],
+                   dependencies : [threads],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootlibexecdir)
+
+        executable('userdbctl',
+                   userdbctl_sources,
+                   include_directories : includes,
+                   link_with : [libshared],
+                   dependencies : [threads],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootbindir)
+endif
+
 foreach alias : ['halt', 'poweroff', 'reboot', 'runlevel', 'shutdown', 'telinit']
         meson.add_install_script(meson_make_symlink,
                                  join_paths(rootbindir, 'systemctl'),
@@ -1963,11 +2069,21 @@ executable('systemd-system-update-generator',
            install_dir : systemgeneratordir)
 
 if conf.get('HAVE_LIBCRYPTSETUP') == 1
+        systemd_cryptsetup_sources = files('''
+                src/cryptsetup/cryptsetup.c
+                src/cryptsetup/cryptsetup-pkcs11.h
+'''.split())
+
+        if conf.get('HAVE_P11KIT') == 1
+                systemd_cryptsetup_sources += files('src/cryptsetup/cryptsetup-pkcs11.c')
+        endif
+
         executable('systemd-cryptsetup',
-                   'src/cryptsetup/cryptsetup.c',
+                   systemd_cryptsetup_sources,
                    include_directories : includes,
                    link_with : [libshared],
-                   dependencies : [libcryptsetup],
+                   dependencies : [libcryptsetup,
+                                   libp11kit],
                    install_rpath : rootlibexecdir,
                    install : true,
                    install_dir : rootlibexecdir)
@@ -2287,6 +2403,21 @@ if conf.get('ENABLE_BINFMT') == 1
                                  mkdir_p.format(binfmtdir))
         meson.add_install_script('sh', '-c',
                                  mkdir_p.format(join_paths(sysconfdir, 'binfmt.d')))
+endif
+
+if conf.get('ENABLE_REPART') == 1
+        executable('systemd-repart',
+                   systemd_repart_sources,
+                   include_directories : includes,
+                   link_with : [libshared],
+                   dependencies : [threads,
+                                   libcryptsetup,
+                                   libblkid,
+                                   libfdisk,
+                                   libopenssl],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootbindir)
 endif
 
 if conf.get('ENABLE_VCONSOLE') == 1
@@ -2702,11 +2833,11 @@ public_programs += exe
 if conf.get('ENABLE_NETWORKD') == 1
         executable('systemd-networkd',
                    systemd_networkd_sources,
-                   include_directories : includes,
+                   include_directories : network_include_dir,
                    link_with : [libnetworkd_core,
                                 libsystemd_network,
                                 libudev_static,
-                                libshared],
+                                networkd_link_with],
                    dependencies : [threads],
                    install_rpath : rootlibexecdir,
                    install : true,
@@ -2716,7 +2847,7 @@ if conf.get('ENABLE_NETWORKD') == 1
                    systemd_networkd_wait_online_sources,
                    include_directories : includes,
                    link_with : [libnetworkd_core,
-                                libshared],
+                                networkd_link_with],
                    install_rpath : rootlibexecdir,
                    install : true,
                    install_dir : rootlibexecdir)
@@ -2725,7 +2856,7 @@ if conf.get('ENABLE_NETWORKD') == 1
                    networkctl_sources,
                    include_directories : includes,
                    link_with : [libsystemd_network,
-                              libshared],
+                              networkd_link_with],
                    install_rpath : rootlibexecdir,
                    install : true,
                    install_dir : rootbindir)
@@ -2734,7 +2865,7 @@ if conf.get('ENABLE_NETWORKD') == 1
         executable('systemd-network-generator',
                    network_generator_sources,
                    include_directories : includes,
-                   link_with : [libshared],
+                   link_with : [networkd_link_with],
                    install_rpath : rootlibexecdir,
                    install : true,
                    install_dir : rootlibexecdir)
@@ -2908,13 +3039,14 @@ make_directive_index_py = find_program('tools/make-directive-index.py')
 make_man_index_py = find_program('tools/make-man-index.py')
 xml_helper_py = find_program('tools/xml_helper.py')
 hwdb_update_sh = find_program('tools/meson-hwdb-update.sh')
+autosuspend_update_sh = find_program('tools/meson-autosuspend-update.sh')
 
-subdir('units')
 subdir('sysctl.d')
 subdir('sysusers.d')
 subdir('tmpfiles.d')
+subdir('hwdb.d')
+subdir('units')
 subdir('presets')
-subdir('hwdb')
 subdir('network')
 subdir('man')
 subdir('shell-completion/bash')
@@ -3067,6 +3199,7 @@ run_target(
         command : [meson_check_api_docs_sh, libsystemd.full_path(), libudev.full_path()])
 
 ############################################################
+watchdog_opt = service_watchdog == '' ? 'disabled' : service_watchdog
 
 status = [
         '@0@ @1@'.format(meson.project_name(), meson.project_version()),
@@ -3115,7 +3248,9 @@ status = [
         'default cgroup hierarchy:          @0@'.format(default_hierarchy),
         'default net.naming-scheme setting: @0@'.format(default_net_naming_scheme),
         'default KillUserProcesses setting: @0@'.format(kill_user_processes),
-        'default locale:                    @0@'.format(default_locale)]
+        'default locale:                    @0@'.format(default_locale),
+        'default user $PATH:                @0@'.format(default_user_path_display),
+        'systemd service watchdog:          @0@'.format(watchdog_opt)]
 
 alt_dns_servers = '\n                                            '.join(dns_servers.split(' '))
 alt_ntp_servers = '\n                                            '.join(ntp_servers.split(' '))
@@ -3156,6 +3291,7 @@ missing = []
 foreach tuple : [
         ['libcryptsetup'],
         ['PAM'],
+        ['p11kit'],
         ['AUDIT'],
         ['IMA'],
         ['AppArmor'],
@@ -3179,6 +3315,7 @@ foreach tuple : [
         ['libiptc'],
         ['elfutils'],
         ['binfmt'],
+        ['repart'],
         ['vconsole'],
         ['quotacheck'],
         ['tmpfiles'],
@@ -3191,6 +3328,7 @@ foreach tuple : [
         ['logind'],
         ['machined'],
         ['portabled'],
+        ['userdb'],
         ['importd'],
         ['hostnamed'],
         ['timedated'],
@@ -3235,6 +3373,7 @@ foreach tuple : [
         ['trace logging',    conf.get('LOG_TRACE') == 1],
         ['link-udev-shared',      get_option('link-udev-shared')],
         ['link-systemctl-shared', get_option('link-systemctl-shared')],
+        ['link-networkd-shared',  get_option('link-networkd-shared')],
 ]
 
         if tuple.length() >= 2

@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -34,7 +35,7 @@
 #include "hostname-util.h"
 #include "macro.h"
 #include "memory-util.h"
-#include "missing.h"
+#include "missing_syscall.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -536,29 +537,41 @@ static int hello_callback(sd_bus_message *reply, void *userdata, sd_bus_error *e
         assert(IN_SET(bus->state, BUS_HELLO, BUS_CLOSING));
 
         r = sd_bus_message_get_errno(reply);
-        if (r > 0)
-                return -r;
+        if (r > 0) {
+                r = -r;
+                goto fail;
+        }
 
         r = sd_bus_message_read(reply, "s", &s);
         if (r < 0)
-                return r;
+                goto fail;
 
-        if (!service_name_is_valid(s) || s[0] != ':')
-                return -EBADMSG;
+        if (!service_name_is_valid(s) || s[0] != ':') {
+                r = -EBADMSG;
+                goto fail;
+        }
 
         r = free_and_strdup(&bus->unique_name, s);
         if (r < 0)
-                return r;
+                goto fail;
 
         if (bus->state == BUS_HELLO) {
                 bus_set_state(bus, BUS_RUNNING);
 
                 r = synthesize_connected_signal(bus);
                 if (r < 0)
-                        return r;
+                        goto fail;
         }
 
         return 1;
+
+fail:
+        /* When Hello() failed, let's propagate this in two ways: first we return the error immediately here,
+         * which is the propagated up towards the event loop. Let's also invalidate the connection, so that
+         * if the user then calls back into us again we won't wait any longer. */
+
+        bus_set_state(bus, BUS_CLOSING);
+        return r;
 }
 
 static int bus_send_hello(sd_bus *bus) {
@@ -1354,8 +1367,7 @@ _public_ int sd_bus_open_user_with_description(sd_bus **ret, const char *descrip
         b->bus_client = true;
         b->is_user = true;
 
-        /* We don't do any per-method access control on the user
-         * bus. */
+        /* We don't do any per-method access control on the user bus. */
         b->trusted = true;
         b->is_local = true;
 
@@ -2660,7 +2672,7 @@ static int process_builtin(sd_bus *bus, sd_bus_message *m) {
                 r = sd_bus_message_new_method_return(m, &reply);
         else if (streq_ptr(m->member, "GetMachineId")) {
                 sd_id128_t id;
-                char sid[33];
+                char sid[SD_ID128_STRING_MAX];
 
                 r = sd_id128_get_machine(&id);
                 if (r < 0)

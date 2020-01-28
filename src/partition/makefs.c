@@ -1,9 +1,6 @@
-/***
-  SPDX-License-Identifier: LGPL-2.1+
-***/
+/* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <fcntl.h>
-#include <signal.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>

@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <errno.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -34,7 +33,7 @@ static int locale_update_system_manager(Context *c, sd_bus *bus) {
         _cleanup_free_ char **l_unset = NULL;
         _cleanup_strv_free_ char **l_set = NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
-        sd_bus_error error = SD_BUS_ERROR_NULL;
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         size_t c_set, c_unset;
         LocaleVariable p;
         int r;

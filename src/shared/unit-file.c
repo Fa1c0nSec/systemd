@@ -6,6 +6,7 @@
 #include "macro.h"
 #include "path-lookup.h"
 #include "set.h"
+#include "special.h"
 #include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
@@ -28,6 +29,41 @@ bool unit_type_may_template(UnitType type) {
                       UNIT_TARGET,
                       UNIT_TIMER,
                       UNIT_PATH);
+}
+
+int unit_symlink_name_compatible(const char *symlink, const char *target, bool instance_propagation) {
+        _cleanup_free_ char *template = NULL;
+        int r, un_type1, un_type2;
+
+        un_type1 = unit_name_classify(symlink);
+
+        /* The straightforward case: the symlink name matches the target and we have a valid unit */
+        if (streq(symlink, target) &&
+            (un_type1 & (UNIT_NAME_PLAIN | UNIT_NAME_INSTANCE)))
+                return 1;
+
+        r = unit_name_template(symlink, &template);
+        if (r == -EINVAL)
+                return 0; /* Not a template */
+        if (r < 0)
+                return r;
+
+        un_type2 = unit_name_classify(target);
+
+        /* An instance name points to a target that is just the template name */
+        if (un_type1 == UNIT_NAME_INSTANCE &&
+            un_type2 == UNIT_NAME_TEMPLATE &&
+            streq(template, target))
+                return 1;
+
+        /* foo@.target.requires/bar@.service: instance will be propagated */
+        if (instance_propagation &&
+            un_type1 == UNIT_NAME_TEMPLATE &&
+            un_type2 == UNIT_NAME_TEMPLATE &&
+            streq(template, target))
+                return 1;
+
+        return 0;
 }
 
 int unit_validate_alias_symlink_and_warn(const char *filename, const char *target) {
@@ -242,10 +278,19 @@ int unit_file_build_name_map(
                 if (!lookup_paths_mtime_exclude(lp, *dir))
                         mtime = MAX(mtime, timespec_load(&st.st_mtim));
 
-                FOREACH_DIRENT(de, d, log_warning_errno(errno, "Failed to read \"%s\", ignoring: %m", *dir)) {
+                FOREACH_DIRENT_ALL(de, d, log_warning_errno(errno, "Failed to read \"%s\", ignoring: %m", *dir)) {
                         char *filename;
                         _cleanup_free_ char *_filename_free = NULL, *simplified = NULL;
                         const char *suffix, *dst = NULL;
+                        bool valid_unit_name;
+
+                        valid_unit_name = unit_name_is_valid(de->d_name, UNIT_NAME_ANY);
+
+                        /* We only care about valid units and dirs with certain suffixes, let's ignore the
+                         * rest. */
+                        if (!valid_unit_name &&
+                            !ENDSWITH_SET(de->d_name, ".wants", ".requires", ".d"))
+                                continue;
 
                         filename = path_join(*dir, de->d_name);
                         if (!filename)
@@ -260,7 +305,7 @@ int unit_file_build_name_map(
                         } else
                                 _filename_free = filename; /* Make sure we free the filename. */
 
-                        if (!unit_name_is_valid(de->d_name, UNIT_NAME_ANY))
+                        if (!valid_unit_name)
                                 continue;
                         assert_se(suffix = strrchr(de->d_name, '.'));
 
@@ -270,6 +315,7 @@ int unit_file_build_name_map(
                         if (hashmap_contains(ids, de->d_name))
                                 continue;
 
+                        dirent_ensure_type(d, de);
                         if (de->d_type == DT_LNK) {
                                 /* We don't explicitly check for alias loops here. unit_ids_map_get() which
                                  * limits the number of hops should be used to access the map. */
@@ -292,7 +338,7 @@ int unit_file_build_name_map(
                                 }
 
                                 /* Get rid of "." and ".." components in target path */
-                                r = chase_symlinks(target, lp->root_dir, CHASE_NOFOLLOW | CHASE_NONEXISTENT, &simplified);
+                                r = chase_symlinks(target, lp->root_dir, CHASE_NOFOLLOW | CHASE_NONEXISTENT, &simplified, NULL);
                                 if (r < 0) {
                                         log_warning_errno(r, "Failed to resolve symlink %s pointing to %s, ignoring: %m",
                                                           filename, target);
@@ -501,4 +547,48 @@ int unit_file_find_fragment(
 
         // FIXME: if instance, consider any unit names with different template name
         return 0;
+}
+
+static const char * const rlmap[] = {
+        "emergency", SPECIAL_EMERGENCY_TARGET,
+        "-b",        SPECIAL_EMERGENCY_TARGET,
+        "rescue",    SPECIAL_RESCUE_TARGET,
+        "single",    SPECIAL_RESCUE_TARGET,
+        "-s",        SPECIAL_RESCUE_TARGET,
+        "s",         SPECIAL_RESCUE_TARGET,
+        "S",         SPECIAL_RESCUE_TARGET,
+        "1",         SPECIAL_RESCUE_TARGET,
+        "2",         SPECIAL_MULTI_USER_TARGET,
+        "3",         SPECIAL_MULTI_USER_TARGET,
+        "4",         SPECIAL_MULTI_USER_TARGET,
+        "5",         SPECIAL_GRAPHICAL_TARGET,
+        NULL
+};
+
+static const char * const rlmap_initrd[] = {
+        "emergency", SPECIAL_EMERGENCY_TARGET,
+        "rescue",    SPECIAL_RESCUE_TARGET,
+        NULL
+};
+
+const char* runlevel_to_target(const char *word) {
+        const char * const *rlmap_ptr;
+        size_t i;
+
+        if (!word)
+                return NULL;
+
+        if (in_initrd()) {
+                word = startswith(word, "rd.");
+                if (!word)
+                        return NULL;
+        }
+
+        rlmap_ptr = in_initrd() ? rlmap_initrd : rlmap;
+
+        for (i = 0; rlmap_ptr[i]; i += 2)
+                if (streq(word, rlmap_ptr[i]))
+                        return rlmap_ptr[i+1];
+
+        return NULL;
 }

@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <fcntl.h>
-#include <stdio.h>
 #include <getopt.h>
+#include <linux/loop.h>
+#include <stdio.h>
 
 #include "architecture.h"
 #include "dissect-image.h"
@@ -21,7 +22,7 @@ static enum {
 } arg_action = ACTION_DISSECT;
 static const char *arg_image = NULL;
 static const char *arg_path = NULL;
-static DissectImageFlags arg_flags = DISSECT_IMAGE_REQUIRE_ROOT|DISSECT_IMAGE_DISCARD_ON_LOOP;
+static DissectImageFlags arg_flags = DISSECT_IMAGE_REQUIRE_ROOT|DISSECT_IMAGE_DISCARD_ON_LOOP|DISSECT_IMAGE_RELAX_VAR_CHECK;
 static void *arg_root_hash = NULL;
 static size_t arg_root_hash_size = 0;
 
@@ -171,7 +172,7 @@ static int run(int argc, char *argv[]) {
         if (r <= 0)
                 return r;
 
-        r = loop_device_make_by_path(arg_image, (arg_flags & DISSECT_IMAGE_READ_ONLY) ? O_RDONLY : O_RDWR, &d);
+        r = loop_device_make_by_path(arg_image, (arg_flags & DISSECT_IMAGE_READ_ONLY) ? O_RDONLY : O_RDWR, LO_FLAGS_PARTSCAN, &d);
         if (r < 0)
                 return log_error_errno(r, "Failed to set up loopback device: %m");
 

@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
+#if HAVE_VALGRIND_MEMCHECK_H
+#include <valgrind/memcheck.h>
+#endif
+
 #include <linux/dm-ioctl.h>
 #include <linux/loop.h>
 #include <sys/mount.h>
@@ -28,7 +32,6 @@
 #include "hexdecoct.h"
 #include "hostname-util.h"
 #include "id128-util.h"
-#include "missing.h"
 #include "mount-util.h"
 #include "mountpoint-util.h"
 #include "nulstr-util.h"
@@ -216,9 +219,15 @@ static int wait_for_partitions_to_appear(
                          * an explicit recognizable error about this, so that callers can generate a
                          * proper message explaining the situation. */
 
-                        if (ioctl(fd, LOOP_GET_STATUS64, &info) >= 0 && (info.lo_flags & LO_FLAGS_PARTSCAN) == 0) {
-                                log_debug("Device is a loop device and partition scanning is off!");
-                                return -EPROTONOSUPPORT;
+                        if (ioctl(fd, LOOP_GET_STATUS64, &info) >= 0) {
+#if HAVE_VALGRIND_MEMCHECK_H
+                                /* Valgrind currently doesn't know LOOP_GET_STATUS64. Remove this once it does */
+                                VALGRIND_MAKE_MEM_DEFINED(&info, sizeof(info));
+#endif
+
+                                if ((info.lo_flags & LO_FLAGS_PARTSCAN) == 0)
+                                        return log_debug_errno(EPROTONOSUPPORT,
+                                                               "Device is a loop device and partition scanning is off!");
                         }
                 }
                 if (r != -EBUSY)
@@ -589,6 +598,43 @@ int dissect_image(
                                         if (!generic_node)
                                                 return -ENOMEM;
                                 }
+
+                        } else if (sd_id128_equal(type_id, GPT_TMP)) {
+
+                                if (pflags & GPT_FLAG_NO_AUTO)
+                                        continue;
+
+                                designator = PARTITION_TMP;
+                                rw = !(pflags & GPT_FLAG_READ_ONLY);
+
+                        } else if (sd_id128_equal(type_id, GPT_VAR)) {
+
+                                if (pflags & GPT_FLAG_NO_AUTO)
+                                        continue;
+
+                                if (!FLAGS_SET(flags, DISSECT_IMAGE_RELAX_VAR_CHECK)) {
+                                        sd_id128_t var_uuid;
+
+                                        /* For /var we insist that the uuid of the partition matches the
+                                         * HMAC-SHA256 of the /var GPT partition type uuid, keyed by machine
+                                         * ID. Why? Unlike the other partitions /var is inherently
+                                         * installation specific, hence we need to be careful not to mount it
+                                         * in the wrong installation. By hashing the partition UUID from
+                                         * /etc/machine-id we can securely bind the partition to the
+                                         * installation. */
+
+                                        r = sd_id128_get_machine_app_specific(GPT_VAR, &var_uuid);
+                                        if (r < 0)
+                                                return r;
+
+                                        if (!sd_id128_equal(var_uuid, id)) {
+                                                log_debug("Found a /var/ partition, but its UUID didn't match our expectations, ignoring.");
+                                                continue;
+                                        }
+                                }
+
+                                designator = PARTITION_VAR;
+                                rw = !(pflags & GPT_FLAG_READ_ONLY);
                         }
 
                         if (designator != _PARTITION_DESIGNATOR_INVALID) {
@@ -833,7 +879,7 @@ static int mount_partition(
         rw = m->rw && !(flags & DISSECT_IMAGE_READ_ONLY);
 
         if (directory) {
-                r = chase_symlinks(directory, where, CHASE_PREFIX_ROOT, &chased);
+                r = chase_symlinks(directory, where, CHASE_PREFIX_ROOT, &chased, NULL);
                 if (r < 0)
                         return r;
 
@@ -901,6 +947,14 @@ int dissected_image_mount(DissectedImage *m, const char *where, uid_t uid_shift,
         if (r < 0)
                 return r;
 
+        r = mount_partition(m->partitions + PARTITION_VAR, where, "/var", uid_shift, flags);
+        if (r < 0)
+                return r;
+
+        r = mount_partition(m->partitions + PARTITION_TMP, where, "/var/tmp", uid_shift, flags);
+        if (r < 0)
+                return r;
+
         boot_mounted = mount_partition(m->partitions + PARTITION_XBOOTLDR, where, "/boot", uid_shift, flags);
         if (boot_mounted < 0)
                 return boot_mounted;
@@ -909,7 +963,7 @@ int dissected_image_mount(DissectedImage *m, const char *where, uid_t uid_shift,
                 /* Mount the ESP to /efi if it exists. If it doesn't exist, use /boot instead, but only if it
                  * exists and is empty, and we didn't already mount the XBOOTLDR partition into it. */
 
-                r = chase_symlinks("/efi", where, CHASE_PREFIX_ROOT, NULL);
+                r = chase_symlinks("/efi", where, CHASE_PREFIX_ROOT, NULL, NULL);
                 if (r >= 0) {
                         r = mount_partition(m->partitions + PARTITION_ESP, where, "/efi", uid_shift, flags);
                         if (r < 0)
@@ -918,7 +972,7 @@ int dissected_image_mount(DissectedImage *m, const char *where, uid_t uid_shift,
                 } else if (boot_mounted <= 0) {
                         _cleanup_free_ char *p = NULL;
 
-                        r = chase_symlinks("/boot", where, CHASE_PREFIX_ROOT, &p);
+                        r = chase_symlinks("/boot", where, CHASE_PREFIX_ROOT, &p, NULL);
                         if (r >= 0 && dir_is_empty(p) > 0) {
                                 r = mount_partition(m->partitions + PARTITION_ESP, where, "/boot", uid_shift, flags);
                                 if (r < 0)
@@ -1324,7 +1378,8 @@ int dissected_image_acquire_metadata(DissectedImage *m) {
                 [META_HOSTNAME]     = "/etc/hostname\0",
                 [META_MACHINE_ID]   = "/etc/machine-id\0",
                 [META_MACHINE_INFO] = "/etc/machine-info\0",
-                [META_OS_RELEASE]   = "/etc/os-release\0/usr/lib/os-release\0",
+                [META_OS_RELEASE]   = "/etc/os-release\0"
+                                      "/usr/lib/os-release\0",
         };
 
         _cleanup_strv_free_ char **machine_info = NULL, **os_release = NULL;
@@ -1519,6 +1574,8 @@ static const char *const partition_designator_table[] = {
         [PARTITION_SWAP] = "swap",
         [PARTITION_ROOT_VERITY] = "root-verity",
         [PARTITION_ROOT_SECONDARY_VERITY] = "root-secondary-verity",
+        [PARTITION_TMP] = "tmp",
+        [PARTITION_VAR] = "var",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(partition_designator, int);

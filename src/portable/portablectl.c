@@ -67,7 +67,7 @@ static int determine_image(const char *image, bool permit_non_existing, char **r
                 return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
                                        "Operations on images by path not supported when connecting to remote systems.");
 
-        r = chase_symlinks(image, NULL, CHASE_TRAIL_SLASH | (permit_non_existing ? CHASE_NONEXISTENT : 0), ret);
+        r = chase_symlinks(image, NULL, CHASE_TRAIL_SLASH | (permit_non_existing ? CHASE_NONEXISTENT : 0), ret, NULL);
         if (r < 0)
                 return log_error_errno(r, "Cannot normalize specified image path '%s': %m", image);
 
@@ -511,8 +511,6 @@ static int list_images(int argc, char *argv[], void *userdata) {
         for (;;) {
                 const char *name, *type, *state;
                 uint64_t crtime, mtime, usage;
-                TableCell *cell;
-                bool ro_bool;
                 int ro_int;
 
                 r = sd_bus_message_read(reply, "(ssbtttso)", &name, &type, &ro_int, &crtime, &mtime, &usage, &state, NULL);
@@ -523,37 +521,16 @@ static int list_images(int argc, char *argv[], void *userdata) {
 
                 r = table_add_many(table,
                                    TABLE_STRING, name,
-                                   TABLE_STRING, type);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to add row to table: %m");
-
-                ro_bool = ro_int;
-                r = table_add_cell(table, &cell, TABLE_BOOLEAN, &ro_bool);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to add row to table: %m");
-
-                if (ro_bool) {
-                        r = table_set_color(table, cell, ansi_highlight_red());
-                        if (r < 0)
-                                return log_error_errno(r, "Failed to set table cell color: %m");
-                }
-
-                r = table_add_many(table,
+                                   TABLE_STRING, type,
+                                   TABLE_BOOLEAN, ro_int,
+                                   TABLE_SET_COLOR, ro_int ? ansi_highlight_red() : NULL,
                                    TABLE_TIMESTAMP, crtime,
                                    TABLE_TIMESTAMP, mtime,
-                                   TABLE_SIZE, usage);
+                                   TABLE_SIZE, usage,
+                                   TABLE_STRING, state,
+                                   TABLE_SET_COLOR, !streq(state, "detached") ? ansi_highlight_green() : NULL);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to add row to table: %m");
-
-                r = table_add_cell(table, &cell, TABLE_STRING, state);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to add row to table: %m");
-
-                if (!streq(state, "detached")) {
-                        r = table_set_color(table, cell, ansi_highlight_green());
-                        if (r < 0)
-                                return log_error_errno(r, "Failed to set table cell color: %m");
-                }
+                        return table_log_add_error(r);
         }
 
         r = sd_bus_message_exit_container(reply);
@@ -781,8 +758,20 @@ static int help(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return log_oom();
 
-        printf("%s [OPTIONS...] {COMMAND} ...\n\n"
-               "Attach or detach portable services from the local system.\n\n"
+        printf("%s [OPTIONS...] COMMAND ...\n\n"
+               "%sAttach or detach portable services from the local system.%s\n"
+               "\nCommands:\n"
+               "  list                        List available portable service images\n"
+               "  attach NAME|PATH [PREFIX...]\n"
+               "                              Attach the specified portable service image\n"
+               "  detach NAME|PATH            Detach the specified portable service image\n"
+               "  inspect NAME|PATH [PREFIX...]\n"
+               "                              Show details of specified portable service image\n"
+               "  is-attached NAME|PATH       Query if portable service image is attached\n"
+               "  read-only NAME|PATH [BOOL]  Mark or unmark portable service image read-only\n"
+               "  remove NAME|PATH...         Remove a portable service image\n"
+               "  set-limit [NAME|PATH]       Set image or pool size limit (disk quota)\n"
+               "\nOptions:\n"
                "  -h --help                   Show this help\n"
                "     --version                Show package version\n"
                "     --no-pager               Do not pipe output into a pager\n"
@@ -796,20 +785,11 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --runtime                Attach portable service until next reboot only\n"
                "     --no-reload              Don't reload the system and service manager\n"
                "     --cat                    When inspecting include unit and os-release file\n"
-               "                              contents\n\n"
-               "Commands:\n"
-               "  list                        List available portable service images\n"
-               "  attach NAME|PATH [PREFIX...]\n"
-               "                              Attach the specified portable service image\n"
-               "  detach NAME|PATH            Detach the specified portable service image\n"
-               "  inspect NAME|PATH [PREFIX...]\n"
-               "                              Show details of specified portable service image\n"
-               "  is-attached NAME|PATH       Query if portable service image is attached\n"
-               "  read-only NAME|PATH [BOOL]  Mark or unmark portable service image read-only\n"
-               "  remove NAME|PATH...         Remove a portable service image\n"
-               "  set-limit [NAME|PATH]       Set image or pool size limit (disk quota)\n"
+               "                              contents\n"
                "\nSee the %s for details.\n"
                , program_invocation_short_name
+               , ansi_highlight()
+               , ansi_normal()
                , link
         );
 

@@ -73,6 +73,7 @@ int varlink_flush(Varlink *v);
 int varlink_close(Varlink *v);
 
 Varlink* varlink_flush_close_unref(Varlink *v);
+Varlink* varlink_close_unref(Varlink *v);
 
 /* Enqueue method call, not expecting a reply */
 int varlink_send(Varlink *v, const char *method, JsonVariant *parameters);
@@ -85,6 +86,10 @@ int varlink_callb(Varlink *v, const char *method, JsonVariant **ret_parameters, 
 /* Enqueue method call, expect a reply, which is eventually delivered to the reply callback */
 int varlink_invoke(Varlink *v, const char *method, JsonVariant *parameters);
 int varlink_invokeb(Varlink *v, const char *method, ...);
+
+/* Enqueue method call, expect a reply now, and possibly more later, which are all delivered to the reply callback */
+int varlink_observe(Varlink *v, const char *method, JsonVariant *parameters);
+int varlink_observeb(Varlink *v, const char *method, ...);
 
 /* Enqueue a final reply */
 int varlink_reply(Varlink *v, JsonVariant *parameters);
@@ -148,6 +153,7 @@ int varlink_server_set_connections_max(VarlinkServer *s, unsigned m);
 int varlink_server_set_description(VarlinkServer *s, const char *description);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Varlink *, varlink_unref);
+DEFINE_TRIVIAL_CLEANUP_FUNC(Varlink *, varlink_close_unref);
 DEFINE_TRIVIAL_CLEANUP_FUNC(Varlink *, varlink_flush_close_unref);
 DEFINE_TRIVIAL_CLEANUP_FUNC(VarlinkServer *, varlink_server_unref);
 
